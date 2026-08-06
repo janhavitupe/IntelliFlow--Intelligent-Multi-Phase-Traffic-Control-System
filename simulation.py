@@ -74,6 +74,8 @@ class Simulation:
         self.scheduler = TrafficScheduler(
             self.intersection, strategy,
             yellow_duration=yellow_duration if yellow_duration is not None else sim_config.YELLOW_TIME,
+            emergency_yellow_duration=sim_config.EMERGENCY_YELLOW_TIME,
+            emergency_max_timeout=sim_config.EMERGENCY_MAX_TIMEOUT,
         )
 
         # Physical discharge model.
@@ -88,6 +90,10 @@ class Simulation:
 
         # Analytics + optional CSV logging.
         self.analytics = Statistics(self.intersection, interval=self.tick_interval)
+
+        # Record each emergency preemption activation in analytics.
+        self.scheduler.set_emergency_callback(self.analytics.record_emergency_preemption)
+
         self.logger = CsvLogger() if log_to_csv else None
 
         self.tick = 0
@@ -116,11 +122,11 @@ class Simulation:
         self.intersection.spawn_batch(spawns)
         self.analytics.record_spawn(len(spawns))
 
-        # Emergency (HIGH-priority) hook for future preemption.
+        # Emergency (HIGH-priority) hook for preemption.
         emergency = sum(1 for _, _, v in spawns if v.priority == Priority.HIGH)
         self.analytics.record_emergency(emergency)
 
-        # 2. Advance scheduler (phase transitions).
+        # 2. Advance scheduler (phase transitions + emergency preemption).
         self.scheduler.update(self.tick_interval)
 
         # 3. Accumulate green time for active movements, then discharge.

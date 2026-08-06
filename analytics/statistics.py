@@ -49,6 +49,8 @@ class Statistics:
         # Emergency tracking.
         self.total_emergency_vehicles = 0
         self.total_emergency_delay = 0.0  # future
+        self.total_emergency_preemptions = 0
+        self.emergency_preemptions_by_approach = {}
 
         # Congestion.
         self.congestion_ticks = 0
@@ -153,6 +155,16 @@ class Statistics:
         """Record emergency (HIGH-priority) vehicles encountered."""
         self.total_emergency_vehicles += count
 
+    def record_emergency_preemption(self, approach_name: str):
+        """
+        Record that an EMERGENCY_OVERRIDE preemption was activated for an
+        approach.
+        """
+        self.total_emergency_preemptions += 1
+        self.emergency_preemptions_by_approach[approach_name] = (
+            self.emergency_preemptions_by_approach.get(approach_name, 0) + 1
+        )
+
     # -------- Computed KPIs --------
 
     @property
@@ -208,6 +220,8 @@ class Statistics:
             "throughput": round(self.throughput, 2),
             "congestion_ratio": round(self.congestion_ratio, 3),
             "emergency_vehicles": self.total_emergency_vehicles,
+            "emergency_preemptions": self.total_emergency_preemptions,
+            "emergency_preemptions_by_approach": self.emergency_preemptions_by_approach,
             "queue_growth_rate": round(self.queue_growth_rate, 3),
             "queue_reduction_rate": round(self.queue_reduction_rate, 3),
             "max_queue_by_movement": self.max_queue_by_movement,

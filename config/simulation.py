@@ -18,6 +18,22 @@ YELLOW_TIME = 2.0            # yellow transition duration (seconds)
 SIMULATION_DURATION = 100    # default number of ticks (None = run forever)
 
 # ---------------------------------------------------------------------------
+# Emergency (ambulance preemption) timing parameters (seconds)
+#
+# EMERGENCY_YELLOW_TIME  : yellow-clearance duration shown to the currently
+#                          green movements before the emergency override
+#                          takes over. This is the REQUIRED safe transition:
+#                          NORMAL GREEN -> YELLOW CLEARANCE -> RED -> EMERGENCY.
+# EMERGENCY_MAX_TIMEOUT  : fail-safe guard. The emergency override normally
+#                          stays active until the ambulance has cleared the
+#                          intersection. This timeout is only a safety net in
+#                          case an ambulance never clears (e.g. it idles or
+#                          is stuck behind another vehicle).
+# ---------------------------------------------------------------------------
+EMERGENCY_YELLOW_TIME = 2.0
+EMERGENCY_MAX_TIMEOUT = 30.0
+
+# ---------------------------------------------------------------------------
 # Vehicle service times (seconds to clear the intersection head-vehicle)
 #
 # Each lane accumulates elapsed green time; a vehicle departs only once
