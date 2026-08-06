@@ -1,0 +1,12 @@
+# Core simulation dependencies
+numpy
+
+# Console rendering (optional but recommended)
+# matplotlib
+
+# --- Future integrations (not required to run the simulator now) ---
+# opencv-python            # YOLO/OpenCV vehicle detection
+# ultralytics              # YOLO model inference
+# traci                   # SUMO TraCI integration
+# sqlalchemy               # database logging
+# flask / fastapi          # React dashboard backend
