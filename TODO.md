@@ -54,3 +54,33 @@
 - [x] TEST 10 Regression (simulation, analytics, CSV, fixed seed)
 
 Run with: `python _validate_emergency.py`
+
+## PHASE 3 - PERCENTILE-BASED ADAPTIVE DENSITY (Complete)
+- [x] 1. config/density.py: create centralized Phase 3 configuration
+- [x] 2. strategies/density_strategy.py: rewrite DensityStrategy (observe -> rank -> classify -> fairness -> score 10 phases -> adaptive green)
+- [x] 3. config/simulation.py: add STRATEGY default (preserves existing validations)
+- [x] 4. analytics/statistics.py: record adaptive decision metrics
+- [x] 5. analytics/logger.py: add adaptive CSV fields
+- [x] 6. simulation.py: strategy_key hook + record adaptive decisions
+- [x] 7. strategies/__init__.py: export DensityStrategy
+- [x] 8. _validate_density_strategy.py: create validation suite (Tests 1-12)
+- [x] 9. Run density validation suite
+- [x] 10. Run regression (Phase 2 + emergency suites still pass)
+- [x] 11. Update README.md + TODO.md documentation
+
+### PHASE 3 Validation (12/12 pass)
+- [x] TEST 1 Highest-ranked approach selected first
+- [x] TEST 2 Ranking updates every scheduling cycle
+- [x] TEST 3 Equal densities behave deterministically
+- [x] TEST 4 LOW-density approaches never starve
+- [x] TEST 5 Green duration increases with sustained traffic flow
+- [x] TEST 6 Green duration always stays within configured limits
+- [x] TEST 7 Emergency override interrupts adaptive control
+- [x] TEST 8 Adaptive control resumes after emergency
+- [x] TEST 9 Fixed seed produces deterministic results
+- [x] TEST 10 Existing Phase 2 validation suite still passes
+- [x] TEST 11 Structural check: no destination_movement / no queue mutation / no signal control
+- [x] TEST 12 Every normal phase reachable under at least one traffic scenario
+
+Run with: `python _validate_density_strategy.py`
+

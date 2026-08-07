@@ -76,6 +76,21 @@ class Statistics:
         self._growth_samples = 0
         self._reduction_samples = 0
 
+        # ---- Phase 3 adaptive density metrics ----
+        #
+        # The adaptive controller (DensityStrategy) publishes a decision
+        # snapshot each scheduling cycle. Statistics records the latest
+        # snapshot plus cumulative counters derived from it.
+        self._last_adaptive_decision_id = None
+        self.adaptive_decision_count = 0
+        self.adaptive_rankings = {}        # rank -> approach (latest)
+        self.adaptive_densities = {}       # approach -> HIGH/MEDIUM/LOW (latest)
+        self.adaptive_selected_phase = None   # PhaseType.name (latest)
+        self.adaptive_green_duration = 0.0    # seconds (latest)
+        self.adaptive_green_by_phase = {}     # PhaseType.name -> seconds (latest)
+        self.fairness_activations = 0
+        self.priority_selections_by_approach = {}  # approach -> count
+
     # -------- Sampling --------
 
     def sample(self):
@@ -165,6 +180,56 @@ class Statistics:
             self.emergency_preemptions_by_approach.get(approach_name, 0) + 1
         )
 
+    # -------- Phase 3 adaptive density recording --------
+
+    def record_adaptive_decision(self, decision: dict):
+        """
+        Record an adaptive scheduling decision produced by DensityStrategy.
+
+        The decision dict is the strategy's `last_decision` snapshot:
+            decision_id, time, approach_counts, rankings, densities, weights,
+            fairness_active, selected_phase, green_duration, scores.
+
+        Cumulative counters (fairness activations, priority selections per
+        approach) are incremented ONLY ONCE per new decision id, so repeated
+        calls within the same scheduling cycle do not double-count.
+        """
+        decision_id = decision.get("decision_id")
+        if decision_id is None:
+            return
+        if decision_id == self._last_adaptive_decision_id:
+            return
+        self._last_adaptive_decision_id = decision_id
+        self.adaptive_decision_count += 1
+
+        # Latest snapshots (for CSV rows / summary).
+        self.adaptive_rankings = dict(decision.get("rankings", {}))
+        self.adaptive_densities = dict(decision.get("densities", {}))
+        self.adaptive_selected_phase = decision.get("selected_phase")
+        self.adaptive_green_duration = float(
+            decision.get("green_duration", 0.0)
+        )
+        # Track the latest adaptive green per selected phase.
+        if self.adaptive_selected_phase is not None:
+            self.adaptive_green_by_phase[self.adaptive_selected_phase] = (
+                self.adaptive_green_duration
+            )
+
+        # Fairness activations: count once per decision where fairness was
+        # applied (a starved approach received a boost).
+        if decision.get("fairness_active"):
+            self.fairness_activations += 1
+
+        # Priority selections per approach: increment the approaches served
+        # by the selected phase. The strategy exposes served approaches for
+        # the selected phase so the analytics layer stays decoupled from
+        # phase/movement internals.
+        served = decision.get("served_approaches", [])
+        for name in served:
+            self.priority_selections_by_approach[name] = (
+                self.priority_selections_by_approach.get(name, 0) + 1
+            )
+
     # -------- Computed KPIs --------
 
     @property
@@ -228,6 +293,15 @@ class Statistics:
             "green_time_by_phase": self.green_time_by_phase,
             "served_by_movement": self.served_by_movement,
             "served_by_type": self.served_by_type,
+            # Phase 3 adaptive density metrics.
+            "adaptive_decision_count": self.adaptive_decision_count,
+            "adaptive_rankings": self.adaptive_rankings,
+            "adaptive_densities": self.adaptive_densities,
+            "adaptive_selected_phase": self.adaptive_selected_phase,
+            "adaptive_green_duration": self.adaptive_green_duration,
+            "adaptive_green_by_phase": self.adaptive_green_by_phase,
+            "fairness_activations": self.fairness_activations,
+            "priority_selections_by_approach": self.priority_selections_by_approach,
         }
 
     def __repr__(self) -> str:

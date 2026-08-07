@@ -34,7 +34,7 @@ d:/traffic/
 ├── strategies/                    # Strategy Design Pattern
 │   ├── base_strategy.py           # Abstract strategy interface
 │   ├── fixed_timer_strategy.py    # Working round-robin strategy
-│   ├── density_strategy.py        # Placeholder (future)
+│   ├── density_strategy.py        # Percentile-based adaptive density strategy (Phase 3)
 │   ├── queue_relaxation_strategy.py  # Placeholder (future - your algorithm)
 │   └── emergency_strategy.py      # Placeholder (future ambulance preemption)
 │
@@ -50,7 +50,10 @@ d:/traffic/
 │
 ├── config/
 │   ├── __init__.py
-│   └── phases.py                  # Phase plan definition (compatible movements)
+│   ├── phases.py                  # Phase plan definition (compatible movements)
+│   ├── simulation.py              # Central timing / simulation parameters
+│   ├── density.py                 # Phase 3 adaptive density configuration
+│   └── traffic_profiles.py        # Time-dependent arrival-rate profiles
 │
 └── images/                        # Reference intersection diagrams
 ```
@@ -147,6 +150,146 @@ reproducible.
 > two lanes can never discharge. This is an inherent property of the approved
 > phase architecture (not a Phase 2 defect) and is isolated in validation by
 > using profiles that spawn only onto served movements.
+
+## Phase 3 - Percentile-Based Adaptive Density Control
+
+The adaptive layer decides *which* phase to activate and *for how long*
+based only on **approach-level density** (number of vehicles waiting on
+North / South / East / West). It never reads a vehicle's intended
+movement — the controller observation boundary is preserved.
+
+### Configuration (`config/density.py`)
+
+All adaptive parameters live in one module (no magic numbers):
+
+- `MIN_GREEN_TIME` / `MAX_GREEN_TIME` — hard limits on any adaptive green
+  duration.
+- `DENSITY_LEVELS` — HIGH / MEDIUM / LOW classification bands (by rank).
+- `FAIRNESS_*` — starvation protection (minimum green for LOW approaches,
+  maximum consecutive HIGH services, starvation age threshold).
+- `GREEN_EXTENSION_*` — continuous-discharge extension model (discharge
+  rate, extension per remaining vehicle, service-time estimate).
+
+### Percentile-Based Ranking
+
+At the start of every scheduling decision the strategy:
+
+1. Counts queued vehicles on each of the four approaches.
+2. Ranks the approaches (deterministic tie-break: fixed scan order
+   `North, South, East, West`).
+3. Classifies density **relative to the current state** (not absolute
+   thresholds): Rank 1 → HIGH, Rank 2 → MEDIUM, Rank 3 → MEDIUM,
+   Rank 4 → LOW.
+
+Because density is percentile-based, the same queue length can be HIGH at
+night and LOW during rush hour — the classification adapts to the current
+intersection state.
+
+### Continuous Green-Time Allocation (interval merging)
+
+Green time is **never** computed as `vehicles × seconds_per_vehicle`.
+Instead it follows the interval-extension idea from LeetCode 495
+(*Teemo Attacking*):
+
+- A green phase is a **continuous discharge interval**.
+- It starts from `MIN_GREEN_TIME`.
+- While significant discharge continues (vehicles remain queued and
+  arrive during the phase), the interval is **extended** — like merging
+  overlapping poison intervals — not restarted or multiplied.
+- The extension is computed from the **approach discharge rate** (how fast
+  the selected phase's lanes can physically clear vehicles) plus a
+  configured service-time estimate for remaining queued vehicles.
+- The result is clamped to `[MIN_GREEN_TIME, MAX_GREEN_TIME]`.
+
+This models vehicles moving simultaneously while the signal stays green,
+instead of independent per-vehicle service slots.
+
+### Fairness
+
+A LOW-density approach can never starve:
+
+- Every approach accumulates a **starvation age** (time since last served).
+- If a LOW approach has waited longer than `FAIRNESS_STARVATION_AGE`, the
+  strategy boosts its priority and guarantees it a minimum green
+  (`FAIRNESS_MIN_GREEN`).
+- A configurable `FAIRNESS_MAX_CONSECUTIVE_HIGH` limits how many times the
+  highest-density approach can be served back-to-back before another
+  approach gets a turn.
+
+### DensityStrategy (`strategies/density_strategy.py`)
+
+Responsibilities (single responsibility):
+
+- observe approach counts
+- compute percentile ranking
+- classify density
+- choose next phase (scores the 10 normal phases by how much density they
+  clear)
+- compute adaptive green duration
+- enforce fairness
+
+It must **not** (and does not):
+
+- move / discharge vehicles
+- manipulate queues
+- control signals directly
+
+The scheduler remains generic — it simply asks the strategy *which phase?*
+and *how long?* and never learns how the decision was made.
+
+### Selecting the strategy
+
+```python
+from simulation import Simulation
+
+# FixedTimer (original behaviour)
+sim = Simulation(strategy_key="fixed_timer")
+
+# Adaptive density control
+sim = Simulation(strategy_key="density", profile_key="RUSH_HOUR")
+```
+
+Emergency preemption is unchanged and always has higher priority than
+adaptive scheduling:
+
+```
+NORMAL GREEN → YELLOW CLEARANCE → EMERGENCY GREEN → RESUME ADAPTIVE CONTROL
+```
+
+### Analytics & CSV
+
+New adaptive metrics are recorded and logged:
+
+- `approach_rankings` (per decision: rank 1..4 → approach)
+- `density_classifications` (approach → HIGH/MEDIUM/LOW)
+- `selected_phase` (the phase chosen by the adaptive layer)
+- `adaptive_green_duration` (seconds assigned)
+- `adaptive_green_by_phase` (accumulated adaptive green per phase)
+- `fairness_activations` (count of fairness boosts)
+- `priority_selections_by_approach` (how often each approach drove the
+  decision)
+
+### Validation
+
+```bash
+python _validate_density_strategy.py
+```
+
+12/12 checks pass:
+
+1. Highest-ranked approach is selected first.
+2. Ranking updates every scheduling cycle.
+3. Equal densities behave deterministically.
+4. LOW-density approaches never starve.
+5. Green duration increases with sustained traffic flow.
+6. Green duration stays within configured limits.
+7. Emergency override interrupts adaptive control.
+8. Adaptive control resumes after emergency.
+9. Fixed seed produces deterministic results.
+10. Existing Phase 2 validation suite still passes.
+11. Structural check (no `destination_movement`, no queue mutation, no
+    signal control).
+12. Every normal phase reachable under at least one traffic scenario.
 
 ## Extending for Future Features
 

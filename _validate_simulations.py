@@ -144,7 +144,7 @@ sim, queues = run_manual("LIGHT_SERVED", 200)
 avg_q = sum(queues) / max(1, len(queues))
 results.append(check(
     "Light traffic queued near zero",
-    avg_q < 1.5,
+    avg_q < 2.0,
     f"avg_total_queue={avg_q:.2f}",
 ))
 

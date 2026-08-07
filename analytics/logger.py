@@ -44,6 +44,13 @@ class CsvLogger:
         "congestion_ratio",
         "lane_queues_json",
         "lane_waits_json",
+        # Phase 3 adaptive density metrics.
+        "approach_rankings_json",
+        "density_classifications_json",
+        "adaptive_selected_phase",
+        "adaptive_green_duration",
+        "fairness_activations",
+        "priority_selections_json",
     ]
 
     def __init__(self, log_dir=None, filename=None, fields=None):

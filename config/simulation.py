@@ -18,6 +18,17 @@ YELLOW_TIME = 2.0            # yellow transition duration (seconds)
 SIMULATION_DURATION = 100    # default number of ticks (None = run forever)
 
 # ---------------------------------------------------------------------------
+# Scheduling strategy
+#
+#   "fixed_timer" : round-robin with a fixed green per phase (Phase 1/2 default).
+#   "density"     : percentile-based adaptive density (Phase 3).
+#
+# Defaults to "fixed_timer" so all existing validations and behavior are
+# preserved unless a run explicitly opts into the adaptive controller.
+# ---------------------------------------------------------------------------
+STRATEGY = "fixed_timer"
+
+# ---------------------------------------------------------------------------
 # Emergency (ambulance preemption) timing parameters (seconds)
 #
 # EMERGENCY_YELLOW_TIME  : yellow-clearance duration shown to the currently

@@ -23,6 +23,7 @@ from core.enums import Priority
 from core.intersection import Intersection
 from scheduler.traffic_scheduler import TrafficScheduler
 from strategies.fixed_timer_strategy import FixedTimerStrategy
+from strategies.density_strategy import DensityStrategy
 from traffic_source.profile_traffic_source import ProfileTrafficSource
 from services.service_model import ServiceModel
 from analytics.statistics import Statistics
@@ -43,6 +44,8 @@ class Simulation:
         profile_key (str): traffic profile for the ProfileTrafficSource.
         seed (int|None): RNG seed for reproducible runs.
         log_to_csv (bool): record per-tick snapshots via CsvLogger.
+        strategy_key (str): "fixed_timer" (default) or "density" (Phase 3
+            percentile-based adaptive density controller).
     """
 
     def __init__(
@@ -55,6 +58,7 @@ class Simulation:
         profile_key: str = None,
         seed: int = None,
         log_to_csv: bool = False,
+        strategy_key: str = None,
     ):
         # Resolve defaults from central config module.
         self.tick_interval = tick_interval if tick_interval is not None else sim_config.TICK_DURATION
@@ -62,15 +66,21 @@ class Simulation:
         self.live = live
         seed = seed if seed is not None else sim_config.SEED
         profile_key = profile_key if profile_key is not None else sim_config.TRAFFIC_PROFILE
+        strategy_key = strategy_key if strategy_key is not None else sim_config.STRATEGY
 
         # Core objects.
         self.intersection = Intersection()
 
-        # Pluggable strategy (FixedTimer for now - swap for Density/QueueRelaxation later).
-        strategy = FixedTimerStrategy(
-            green_duration=green_duration if green_duration is not None else sim_config.GREEN_TIME,
-            yellow_duration=yellow_duration if yellow_duration is not None else sim_config.YELLOW_TIME,
-        )
+        # Pluggable strategy. "fixed_timer" preserves the existing round-robin
+        # controller; "density" opts into the adaptive Phase 3 scheduler.
+        if strategy_key == "density":
+            strategy = DensityStrategy()
+        else:
+            strategy = FixedTimerStrategy(
+                green_duration=green_duration if green_duration is not None else sim_config.GREEN_TIME,
+                yellow_duration=yellow_duration if yellow_duration is not None else sim_config.YELLOW_TIME,
+            )
+        self.strategy = strategy
         self.scheduler = TrafficScheduler(
             self.intersection, strategy,
             yellow_duration=yellow_duration if yellow_duration is not None else sim_config.YELLOW_TIME,
@@ -129,6 +139,13 @@ class Simulation:
         # 2. Advance scheduler (phase transitions + emergency preemption).
         self.scheduler.update(self.tick_interval)
 
+        # 2b. Record the adaptive decision snapshot (Phase 3 analytics).
+        #     The DensityStrategy publishes a `last_decision` dict each time
+        #     it selects a phase. Statistics deduplicates by decision_id, so
+        #     repeated calls within a cycle never double-count.
+        if isinstance(self.strategy, DensityStrategy) and self.strategy.last_decision is not None:
+            self.analytics.record_adaptive_decision(self.strategy.last_decision)
+
         # 3. Accumulate green time for active movements, then discharge.
         active = self.scheduler.active_movements()
         self.service_model.accumulate(active, self.tick_interval)
@@ -167,7 +184,7 @@ class Simulation:
             lane_queues[mid] = movement.lane.queue_length
             lane_waits[mid] = movement.lane.queue.total_waiting_time
 
-        return {
+        row = {
             "simulation_time": round(self.intersection.time, 2),
             "tick": self.tick,
             "active_phase": phase.name if phase else "None",
@@ -183,6 +200,24 @@ class Simulation:
                 {k: round(v, 2) for k, v in lane_waits.items()}
             ),
         }
+
+        # Phase 3 adaptive metrics (populated when the density strategy is
+        # active; empty/zero otherwise so fixed-timer rows remain valid).
+        row["approach_rankings_json"] = json.dumps(
+            self.analytics.adaptive_rankings
+        )
+        row["density_classifications_json"] = json.dumps(
+            self.analytics.adaptive_densities
+        )
+        row["adaptive_selected_phase"] = self.analytics.adaptive_selected_phase or ""
+        row["adaptive_green_duration"] = round(
+            self.analytics.adaptive_green_duration, 2
+        )
+        row["fairness_activations"] = self.analytics.fairness_activations
+        row["priority_selections_json"] = json.dumps(
+            self.analytics.priority_selections_by_approach
+        )
+        return row
 
     # -------- Rendering --------
 
@@ -233,3 +268,4 @@ class Simulation:
             f"phase={self.scheduler.active_phase_type}, "
             f"queued={self.intersection.total_queue_length()})"
         )
+
