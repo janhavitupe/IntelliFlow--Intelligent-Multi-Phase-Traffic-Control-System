@@ -8,5 +8,6 @@ so new algorithms can be added without modifying the scheduler.
 from .base_strategy import BaseStrategy
 from .fixed_timer_strategy import FixedTimerStrategy
 from .density_strategy import DensityStrategy
+from .rl_strategy import RLStrategy
 
-__all__ = ["BaseStrategy", "FixedTimerStrategy", "DensityStrategy"]
+__all__ = ["BaseStrategy", "FixedTimerStrategy", "DensityStrategy", "RLStrategy"]

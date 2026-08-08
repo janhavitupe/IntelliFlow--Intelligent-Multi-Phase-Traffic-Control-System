@@ -291,6 +291,113 @@ python _validate_density_strategy.py
     signal control).
 12. Every normal phase reachable under at least one traffic scenario.
 
+## Phase 4 - Reinforcement Learning Wrapper
+
+Phase 4 wraps the existing simulator in a standard Gym-style interface
+(`reset()` / `step(action)`) and adds reinforcement-learning agents that
+learn which phase to grant green next. The scheduler/controller code is
+completely untouched — the RL agent is just another pluggable `BaseStrategy`.
+
+### Gym-style environment (`env/`)
+
+`TrafficRLEnv` exposes the standard contract:
+
+```
+reset()              -> observation (23-dim float32)
+step(action)         -> (next_obs, reward, done, info)
+action_space         -> 10 (choose one of the 10 normal phases)
+observation_space    -> (23,)
+```
+
+**Observation** reuses exactly what the Density strategy already computes
+(no new features invented):
+
+| indices | feature                                   |
+|---------|-------------------------------------------|
+| 0–3     | queue length per approach (normalized)    |
+| 4–7     | percentile rank per approach (1..4)       |
+| 8–11    | starvation counters per approach          |
+| 12–21   | active phase one-hot (10 normal phases)   |
+| 22      | elapsed seconds in the current phase      |
+
+**Action** is "pick one of the 10 phases" at each **decision point**
+(a minimum-green boundary), not every tick. The policy's chosen phase runs
+through the same yellow/red transition machinery as any other strategy.
+Green duration stays handled by the existing extension logic.
+
+**Reward** (deliberately crude): `r = -sum(queue_lengths)` over the step —
+a "minimize congestion" proxy sufficient to get a learning signal.
+
+**Emergency** is fully rule-based and outside the learning loop. The
+scheduler's preemption state machine runs internally and never consults the
+RL strategy, so the agent never sees or acts during an emergency window.
+
+### Agents (`rl/`)
+
+- **Tabular Q-learning** (`rl/agents.py`): discretizes the state into
+  queue LOW/MED/HIGH per approach folded with the last-active-phase
+  (3⁴ × 10 = 810 states). Fast, interpretable, trains in seconds — the
+  sanity baseline.
+- **DQN** (`rl/dqn.py`): a hand-rolled pure-numpy MLP (2 hidden layers of
+  64) over the raw 23-dim state, with a replay buffer and target network.
+  No PyTorch dependency — the gradient updates are implemented manually.
+  The backprop is validated independently on a tiny XOR problem
+  (`_validate_mlp.py`) before it is wired into RL, per the phase-4 spec.
+
+### Training (`rl/train.py`)
+
+```
+python plot_rewards.py [n_episodes]   # train tabular Q + plot reward curve
+```
+
+- Episode = a fixed-length window (`EPISODE_LENGTH` ticks) of a traffic
+  profile.
+- Profiles cycle across episodes (LIGHT / NORMAL / RUSH / NIGHT / CUSTOM)
+  so the agent doesn't overfit to one pattern.
+- A fixed per-episode seed makes evaluation reproducible.
+- The per-episode cumulative reward curve is the key evidence that learning
+  is working (rising curve = RL is improving).
+
+### RLStrategy (`strategies/rl_strategy.py`)
+
+At inference/demo time, `RLStrategy` wraps a trained agent and selects
+`argmax_a Q(state, a)` — a table lookup (tabular) or one forward pass (DQN).
+No training happens live. It runs as a normal pluggable strategy:
+
+```python
+from strategies.rl_strategy import RLStrategy
+from rl.train import train_tabular
+
+agent, rewards = train_tabular(n_episodes=100)
+sim = Simulation(strategy=RLStrategy(agent=agent), profile_key="RUSH_HOUR")
+```
+
+### Evaluation (`evaluation/evaluate.py`)
+
+Run FixedTimer, Density, and RL through the **same** profile + seed and
+compare using the existing analytics KPIs (avg wait, throughput, max queue,
+congestion ratio). This three-way comparison is the demo narrative:
+*naïve baseline → engineered rule-based → learned*.
+
+```
+python -c "from evaluation.evaluate import *; from strategies.fixed_timer_strategy import *; from strategies.density_strategy import *; from strategies.rl_strategy import *; from rl.train import train_tabular; a,_=train_tabular(n_episodes=30,verbose=False); print_comparison(evaluate_strategies({'fixed_timer':FixedTimerStrategy(),'density':DensityStrategy(),'rl':RLStrategy(agent=a)}))"
+```
+
+> Honest result note: on a small single-intersection problem a well-tuned
+> rule-based system (Density) often beats a thinly-trained RL agent, and
+> that is a fine, honest narrative. The RL value is the learned policy +
+> the framework, not necessarily guaranteeing RL > Density.
+
+### Validation
+
+```bash
+python _validate_rl.py            # Stage 1: env + tabular Q (11 tests)
+python _validate_rl_stage2.py     # Stage 2: DQN + eval harness (7 tests)
+python _validate_mlp.py           # MLP backprop gradient check + XOR (3 tests)
+```
+
+All suites pass, including regression against the Phase 2/3 suites.
+
 ## Extending for Future Features
 
 | Feature                    | Where it plugs in                                  |
@@ -299,6 +406,7 @@ python _validate_density_strategy.py
 | Ambulance preemption       | `strategies/emergency_strategy.py` + `EMERGENCY_OVERRIDE` phase |
 | Density scheduling         | `strategies/density_strategy.py`                   |
 | Queue Relaxation Algorithm | `strategies/queue_relaxation_strategy.py`          |
+| RL phase selection         | `strategies/rl_strategy.py` + `env/` + `rl/`       |
 | SUMO integration           | `traffic_source/sumo_generator.py`                 |
 | React dashboard            | `analytics/statistics.py` (export KPIs)            |
 | Database logging           | `analytics/statistics.py` (persist snapshot)       |

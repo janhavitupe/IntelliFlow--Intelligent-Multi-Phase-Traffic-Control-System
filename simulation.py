@@ -59,6 +59,7 @@ class Simulation:
         seed: int = None,
         log_to_csv: bool = False,
         strategy_key: str = None,
+        strategy=None,
     ):
         # Resolve defaults from central config module.
         self.tick_interval = tick_interval if tick_interval is not None else sim_config.TICK_DURATION
@@ -71,9 +72,14 @@ class Simulation:
         # Core objects.
         self.intersection = Intersection()
 
-        # Pluggable strategy. "fixed_timer" preserves the existing round-robin
-        # controller; "density" opts into the adaptive Phase 3 scheduler.
-        if strategy_key == "density":
+        # Pluggable strategy. An explicitly injected `strategy` object takes
+        # precedence (used by Phase 4 to run a trained RLStrategy as a normal
+        # strategy in the evaluation harness). Otherwise "fixed_timer"
+        # preserves the round-robin controller and "density" opts into the
+        # adaptive Phase 3 scheduler.
+        if strategy is not None:
+            strategy = strategy
+        elif strategy_key == "density":
             strategy = DensityStrategy()
         else:
             strategy = FixedTimerStrategy(

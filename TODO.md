@@ -84,3 +84,56 @@ Run with: `python _validate_emergency.py`
 
 Run with: `python _validate_density_strategy.py`
 
+## PHASE 4 - REINFORCEMENT LEARNING (Stage 1: Env + Tabular Q, Complete)
+- [x] 1. config/rl.py: RL configuration (gamma, epsilon schedule, episode length, profiles, discretization thresholds)
+- [x] 2. env/state_builder.py: ObservationBuilder (23-dim obs reusing Density features) + Discretizer (810 tabular states)
+- [x] 3. env/traffic_env.py: Gym-style environment (reset/step, action_space=10, reward=-sum(queue))
+- [x] 4. strategies/rl_strategy.py: RLStrategy inference wrapper (set_pending/decide_next_phase hooks)
+- [x] 5. rl/agents.py: TabularQAgent (epsilon-greedy, Q-learning update, inference argmax)
+- [x] 6. rl/train.py: train_tabular loop (cycles profiles, returns reward curve)
+- [x] 7. plot_rewards.py: reward-curve plotting (matplotlib with ASCII fallback)
+- [x] 8. _validate_rl.py: validation suite (Tests 1-11)
+- [x] 9. Run RL validation + regression (Phase 2/density/emergency suites still pass)
+
+### PHASE 4 STAGE 1 Validation (11/11 pass)
+- [x] TEST 1 reset() returns 23-dim observation
+- [x] TEST 2 step(action) returns (obs, reward, done, info)
+- [x] TEST 3 action space == 10
+- [x] TEST 4 reward never positive (-sum queue)
+- [x] TEST 5 step activates the requested phase
+- [x] TEST 6 episode terminates within the tick budget
+- [x] TEST 7 TabularQAgent Q-table shape (810, 10)
+- [x] TEST 8 tabular training produces a rising reward curve
+- [x] TEST 9 fixed-seed tabular training is reproducible
+- [x] TEST 10 emergency preemption does not break the step contract
+- [x] TEST 11 existing Phase 2 validation suite still passes
+
+Run with: `python _validate_rl.py`
+
+## PHASE 4 - REINFORCEMENT LEARNING (Stage 2: DQN + Evaluation, Complete)
+- [x] 1. rl/dqn.py: pure-numpy MLP (2 hidden layers of 64) + gradient check on XOR (validated independently)
+- [x] 2. rl/dqn.py: DQNAgent (replay buffer, target network, epsilon-greedy)
+- [x] 3. rl/train.py: train_dqn loop over the 23-dim observation
+- [x] 4. evaluation/evaluate.py: three-way comparison (FixedTimer / Density / RL) on identical seeds using Statistics.summary()
+- [x] 5. strategies/rl_strategy.py: self-driving inference mode (argmax over tabular/DQN) for evaluation/demo
+- [x] 6. simulation.py: accept injected `strategy` object (RLStrategy runs as a normal pluggable strategy)
+- [x] 7. _validate_mlp.py: independent MLP backprop gradient check + XOR fit (3/3)
+- [x] 8. _validate_rl_stage2.py: DQN + evaluation harness validation (7/7)
+- [x] 9. Update README.md + TODO.md documentation
+
+### PHASE 4 STAGE 2 Validation (7/7 pass)
+- [x] TEST 1 DQN MLP backprop finite, non-zero gradients
+- [x] TEST 2 DQN training loop returns a reward curve
+- [x] TEST 3 RLStrategy self-drives with a DQN agent (argmax, no env)
+- [x] TEST 4 RLStrategy self-drives with a tabular agent
+- [x] TEST 5 three-way evaluation harness runs all strategies
+- [x] TEST 6 Simulation runs with an injected RLStrategy
+- [x] TEST 7 existing Phase 4 Stage 1 suite still passes
+
+### MLP VALIDATION (3/3 pass)
+- [x] TEST 1 numeric gradient check (analytic vs finite-diff, max rel err ~1e-10)
+- [x] TEST 2 XOR fit (MLP learns non-linear XOR with SGD)
+- [x] TEST 3 DQNAgent smoke (forward + replay update + action selection)
+
+Run with: `python _validate_rl_stage2.py`, `python _validate_mlp.py`
+
