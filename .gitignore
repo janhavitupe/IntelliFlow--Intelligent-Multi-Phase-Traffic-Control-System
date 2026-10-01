@@ -13,3 +13,6 @@ dev_notes/
 
 # Trained agents (reproducible: python run_experiments.py)
 models/
+
+# Test cache
+.pytest_cache/
