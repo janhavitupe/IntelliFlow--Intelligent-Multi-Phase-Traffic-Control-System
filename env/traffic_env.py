@@ -8,35 +8,42 @@ regular Simulation class, but:
   - decisions are made by an RLStrategy that holds a `pending_phase`
     chosen by the agent (inference-time: argmax, training-time: epsilon-
     greedy), rather than by a rule-based strategy.
-  - step() advances the simulator until the NEXT decision point (the moment
-    the scheduler requests a new phase at a minimum-green boundary), then
-    returns (next_state, reward, done, info).
+  - A decision point is the moment the scheduler asks for the next phase
+    (first tick, and after each phase's green + yellow). The env pauses the
+    tick right there, hands the observation to the agent, and resumes the
+    same tick once step(action) supplies the phase - so no simulated time
+    is spent waiting for the agent.
+  - step(a) applies `a` immediately and returns the reward accumulated
+    while `a`'s phase was in control, i.e. the reward is credited to the
+    action that caused it.
 
 Contract:
-  reset()              -> observation (23-dim)
+  reset()              -> observation (23-dim) at the first decision point
   step(action)         -> (next_obs, reward, done, info)
+  discrete_state       -> tabular bucket for the current decision point
   action_space         -> n = 10 (choose one normal phase)
   observation_space    -> shape = (23,)
 
-Reward: r = -sum(queue_lengths) accumulated over the tick(s) of the step.
-This is a crude "minimize congestion" proxy sufficient to get a signal.
+Reward: r = -(queueing delay during the step) / REWARD_SCALE, where the
+delay is sum over ticks of (total queue * tick seconds) = vehicle-seconds
+spent waiting. Minimizing it minimizes total delay.
+
+Episodes end on a time limit only. Traffic never "finishes", so the final
+step is a truncation, not a terminal state: info["truncated"] is True and
+learners should still bootstrap from next_obs.
 
 Emergency/ambulance handling is untouched: the scheduler's preemption state
 machine runs internally and never consults the strategy, so the agent never
 sees or acts during an emergency window.
 """
-import numpy as np
-
 from config.phases import all_phase_types
 from config import rl as rl_config
 from config import simulation as sim_config
-from core.enums import PhaseType
 from core.intersection import Intersection
 from scheduler.traffic_scheduler import TrafficScheduler
 from traffic_source.profile_traffic_source import ProfileTrafficSource
 from services.service_model import ServiceModel
 from strategies.rl_strategy import RLStrategy
-from .state_builder import ObservationBuilder, Discretizer
 
 
 class TrafficRLEnv:
@@ -47,7 +54,6 @@ class TrafficRLEnv:
         profile_key (str): traffic profile for the step.
         episode_length (int): number of simulation ticks per episode.
         seed (int|None): base seed for the traffic source.
-        green_duration (float): green seconds granted to the chosen phase.
         tick_interval (float): seconds per simulated tick.
     """
 
@@ -56,7 +62,6 @@ class TrafficRLEnv:
         profile_key="NORMAL_TRAFFIC",
         episode_length=None,
         seed=None,
-        green_duration=None,
         tick_interval=None,
     ):
         self.profile_key = profile_key
@@ -66,11 +71,6 @@ class TrafficRLEnv:
             else rl_config.EPISODE_LENGTH
         )
         self.seed = seed if seed is not None else rl_config.SEED
-        self.green_duration = (
-            green_duration
-            if green_duration is not None
-            else rl_config.GREEN_DURATION
-        )
         self.tick_interval = (
             tick_interval
             if tick_interval is not None
@@ -81,13 +81,6 @@ class TrafficRLEnv:
         self.action_space = len(self.phase_types)  # 10 discrete actions
         self.observation_space = (23,)
 
-        # State builders (reuse the Density strategy's features).
-        self.obs_builder = ObservationBuilder()
-        self.discretizer = Discretizer()
-
-        # Optional rule-based density reference for starvation counters.
-        self.density_ref = None
-
         # Runtime state (rebuilt each reset).
         self.intersection = None
         self.scheduler = None
@@ -95,28 +88,6 @@ class TrafficRLEnv:
         self.traffic_source = None
         self.strategy = None
         self.tick = 0
-        self._pending_phase = None
-        self._decision_ready = False
-        self._last_phase = None
-        self._elapsed_in_phase = 0.0
-
-    # ------------------------------------------------------------------
-    # Spatial / bookkeeping helpers
-    # ------------------------------------------------------------------
-
-    def _approach_counts(self) -> dict:
-        return {
-            name: self.intersection.get_approach(name).total_queue_length()
-            for name in ("North", "South", "East", "West")
-        }
-
-    def _elapsed_in_current_phase(self) -> float:
-        """Seconds already spent in the current phase (green+yellow)."""
-        if self.scheduler is None or self.scheduler.current_phase is None:
-            return 0.0
-        # Reconstruct from the intersection clock minus phase start time.
-        # We track it incrementally instead for simplicity.
-        return self._elapsed_in_phase
 
     # ------------------------------------------------------------------
     # Gym-style interface
@@ -124,18 +95,17 @@ class TrafficRLEnv:
 
     def reset(self, seed=None):
         """
-        Reset the simulator and return the initial observation.
+        Reset the simulator, advance to the first decision point and return
+        the initial observation.
 
-        The environment picks a fresh per-episode seed (SEED + episode
-        counter) so each episode sees varied traffic, but any FIXED seed is
-        reproducible (used for evaluation comparisons).
+        Any FIXED seed is reproducible (used for evaluation comparisons).
         """
         if seed is not None:
             self.seed = seed
 
         # Fresh world.
         self.intersection = Intersection()
-        self.strategy = RLStrategy()  # holds pending_phase set by the agent
+        self.strategy = RLStrategy()
         self.scheduler = TrafficScheduler(
             self.intersection,
             self.strategy,
@@ -149,124 +119,105 @@ class TrafficRLEnv:
             seed=self.seed,
             tick_duration=self.tick_interval,
         )
-
         self.tick = 0
-        self._pending_phase = None
-        self._decision_ready = True
-        self._last_phase = None
-        self._elapsed_in_phase = 0.0
-        self.episode_reward = 0.0
 
-        # Let the strategy build its phase plan lazily (needed for the
-        # scheduler to call decide_next_phase against a real intersection).
-        self.strategy.reset(self.intersection)
-
-        return self._observe()
+        # The scheduler asks for a phase on the very first tick.
+        _, done = self._run_until_decision()
+        assert not done, "episode ended before the first decision"
+        return self.strategy.last_obs
 
     def step(self, action):
         """
-        Activate the chosen phase, advance until the next decision point,
-        and return (next_obs, reward, done, info).
+        Apply `action` at the current decision point, run the simulator
+        until the NEXT decision point, and return (next_obs, reward, done,
+        info). The reward covers exactly the ticks during which this
+        action was in control (an extension, or yellow + a new phase's
+        minimum green). info["duration"] is that span in seconds.
 
         Args:
             action (int): index into all_phase_types() (0..9).
         """
         if not 0 <= action < self.action_space:
             raise ValueError(f"action {action} out of range [0, {self.action_space})")
+        if not self.strategy.awaiting_action:
+            raise RuntimeError("step() called while not at a decision point")
 
-        phase_type = self.phase_types[action]
-        self._pending_phase = phase_type
-        # Push the chosen phase to the strategy so the scheduler's next
-        # decision request can consume it.
-        self.strategy.set_pending(phase_type)
-        self.strategy.decision_made = False
-        self._decision_ready = False
+        # Resume the paused tick: the scheduler re-asks the strategy (with a
+        # zero time delta), which consumes the pending action.
+        start_tick = self.tick
+        self.strategy.set_pending(action)
+        self.scheduler.update(0.0)
+        assert not self.strategy.awaiting_action
 
+        reward = self._finish_tick()
+        more_reward, done = self._run_until_decision()
+        reward += more_reward
+
+        if done:
+            # Episode cut off mid-phase: report the state as of now.
+            self.strategy.observe(
+                self.intersection,
+                self.scheduler.current_phase,
+                self.intersection.time,
+            )
+        info = {
+            "truncated": done,
+            "duration": (self.tick - start_tick) * self.tick_interval,
+        }
+        return self.strategy.last_obs, reward, done, info
+
+    # ------------------------------------------------------------------
+    # Tick mechanics (mirrors Simulation.step's order)
+    # ------------------------------------------------------------------
+
+    def _run_until_decision(self):
+        """
+        Advance whole ticks until the scheduler asks for a decision (that
+        tick is then paused after its scheduler update) or the episode
+        budget is exhausted.
+
+        Returns:
+            (float, bool): (reward accumulated, done).
+        """
         reward = 0.0
-        done = False
-        info = {}
+        while self.tick < self.episode_length:
+            self._start_tick()
+            if self.strategy.awaiting_action:
+                return reward, False
+            reward += self._finish_tick()
+        return reward, True
 
-        # Advance ticks until the scheduler requests the next decision,
-        # or the episode budget is exhausted.
-        while not self._decision_ready and not done:
-            self._advance_tick()
-            reward += self._tick_reward()
-            if self.tick >= self.episode_length:
-                done = True
-
-        next_obs = self._observe()
-        info["decision_point_reached"] = True
-        return next_obs, reward, done, info
-
-    def _advance_tick(self):
-        """Run one simulator tick (mirrors Simulation.step's core order)."""
-        t = self.intersection.time
-
-        # 1. Spawn new vehicles.
-        spawns = self.traffic_source.generate_spawns(t)
+    def _start_tick(self):
+        """First half of a tick: spawn vehicles, advance the scheduler."""
+        spawns = self.traffic_source.generate_spawns(self.intersection.time)
         self.intersection.spawn_batch(spawns)
-
-        # 2. Advance scheduler (phase transitions + emergency preemption).
-        #    The RLStrategy's decide_next_phase() will consume the pending
-        #    phase and set _decision_ready when it is asked for a decision.
+        # May end in a decision request (strategy.awaiting_action).
         self.scheduler.update(self.tick_interval)
 
-        # 3. Discharge via the service model.
+    def _finish_tick(self) -> float:
+        """Second half of a tick: discharge, waits, clock. Returns reward."""
         active = self.scheduler.active_movements()
         self.service_model.accumulate(active, self.tick_interval)
         self.service_model.discharge(active)
 
-        # 4. Advance waiting times + clock.
         self.intersection.update_waiting_times(self.tick_interval)
         self.intersection.advance_time(self.tick_interval)
-
-        # 5. Track phase elapsed time.
-        self._update_elapsed()
-
-        # 6. Detect whether the scheduler requested (and the strategy made) a
-        #    decision this tick. This marks the next decision point.
-        self._decision_ready = self.strategy.decision_made
-        self.strategy.decision_made = False
-
         self.tick += 1
-
-    def _update_elapsed(self):
-        """Increment elapsed time if a phase is active; reset on switch."""
-        if self.scheduler is not None and self.scheduler.current_phase is not None:
-            self._elapsed_in_phase += self.tick_interval
-        else:
-            self._elapsed_in_phase = 0.0
+        return self._tick_reward()
 
     def _tick_reward(self) -> float:
-        """Per-tick reward: -total queue length."""
-        return -float(self.intersection.total_queue_length())
-
-    def _observe(self) -> np.ndarray:
-        """Build the 23-dim observation vector."""
-        active = self.scheduler.active_phase_type
-        return self.obs_builder.build(
-            self.intersection,
-            active,
-            self._elapsed_in_phase,
-        )
+        """Per-tick reward: -(vehicle-seconds queued this tick), scaled."""
+        delay = self.intersection.total_queue_length() * self.tick_interval
+        return -delay / rl_config.REWARD_SCALE
 
     # ------------------------------------------------------------------
     # Discrete state (for tabular Q)
     # ------------------------------------------------------------------
 
-    def discretize_state(self, last_phase=None) -> int:
-        """Map current state to a tabular bucket."""
-        counts = self._approach_counts()
-        lp = last_phase if last_phase is not None else self._last_phase
-        return self.discretizer.discretize(counts, lp)
-
     @property
-    def last_phase(self):
-        return self._last_phase
-
-    @last_phase.setter
-    def last_phase(self, value):
-        self._last_phase = value
+    def discrete_state(self) -> int:
+        """Tabular bucket for the current decision point."""
+        return self.strategy.last_state
 
     def __repr__(self):
         return (

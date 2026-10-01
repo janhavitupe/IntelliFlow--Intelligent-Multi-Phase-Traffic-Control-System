@@ -40,9 +40,15 @@ STRATEGY = "fixed_timer"
 #                          intersection. This timeout is only a safety net in
 #                          case an ambulance never clears (e.g. it idles or
 #                          is stuck behind another vehicle).
+# EMERGENCY_COOLDOWN     : after a fail-safe timeout, that approach may not
+#                          preempt again for this long, so normal service
+#                          genuinely resumes. Without it the still-queued
+#                          ambulance is re-detected on the very next tick and
+#                          the "safety net" never releases the intersection.
 # ---------------------------------------------------------------------------
 EMERGENCY_YELLOW_TIME = 2.0
 EMERGENCY_MAX_TIMEOUT = 30.0
+EMERGENCY_COOLDOWN = 30.0
 
 # ---------------------------------------------------------------------------
 # Vehicle service times (seconds to clear the intersection head-vehicle)

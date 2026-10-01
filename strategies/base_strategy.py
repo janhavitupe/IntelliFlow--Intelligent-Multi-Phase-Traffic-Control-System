@@ -10,6 +10,10 @@ strategies without touching the scheduler.
 """
 from abc import ABC, abstractmethod
 
+# Returned by on_green_end() to make the scheduler hold the current green
+# without advancing (the RL environment uses this to pause for an action).
+HOLD = object()
+
 
 class BaseStrategy(ABC):
     """
@@ -34,6 +38,20 @@ class BaseStrategy(ABC):
                 to signal no change / use defaults.
         """
         raise NotImplementedError
+
+    def on_green_end(self, intersection, current_phase, time):
+        """
+        Called when the active phase's green time runs out.
+
+        Returns:
+            None   -> end the phase normally (yellow, then decide_next_phase).
+            float  -> extend the green by this many seconds.
+            HOLD   -> keep the green and ask again next update.
+
+        The default never extends, so strategies that size their green up
+        front (FixedTimer, Density) behave exactly as before.
+        """
+        return None
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.name})"

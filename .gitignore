@@ -8,3 +8,8 @@ logs/
 .vscode/
 
 .env
+# Private engineering journal - never commit
+dev_notes/
+
+# Trained agents (reproducible: python run_experiments.py)
+models/

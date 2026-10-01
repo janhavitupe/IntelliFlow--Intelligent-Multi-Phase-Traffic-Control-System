@@ -30,6 +30,7 @@ Emergency preemption:
 """
 from core.enums import PhaseType, SignalState
 from config import phases as phase_config
+from strategies.base_strategy import HOLD
 from config import simulation as sim_config
 
 # Fixed, deterministic scan order for ambulance detection. The first approach
@@ -60,6 +61,7 @@ class TrafficScheduler:
         yellow_duration: float = 2.0,
         emergency_yellow_duration: float = None,
         emergency_max_timeout: float = None,
+        emergency_cooldown: float = None,
     ):
         self.intersection = intersection
         self.strategy = strategy
@@ -77,6 +79,11 @@ class TrafficScheduler:
             if emergency_max_timeout is not None
             else sim_config.EMERGENCY_MAX_TIMEOUT
         )
+        self.emergency_cooldown = (
+            emergency_cooldown
+            if emergency_cooldown is not None
+            else sim_config.EMERGENCY_COOLDOWN
+        )
 
         # Build the phase plan from configuration.
         self.phase_plan = phase_config.build_phase_plan(intersection)
@@ -90,6 +97,7 @@ class TrafficScheduler:
         self._emergency_clearance_remaining = 0.0
         self._emergency_active_remaining = 0.0
         self._emergency_callback = None      # optional on-activate hook
+        self._emergency_cooldowns = {}       # approach -> seconds remaining
 
     # -------- Public scheduling API --------
 
@@ -199,6 +207,8 @@ class TrafficScheduler:
         conflicting approaches are never both green.
         """
         for approach_name in APPROACH_ORDER:
+            if self._emergency_cooldowns.get(approach_name, 0.0) > 0:
+                continue  # recently timed out; let normal service run
             if self._approach_has_emergency(approach_name):
                 return approach_name
         return None
@@ -289,6 +299,8 @@ class TrafficScheduler:
             self._end_emergency()
         elif self.green_remaining <= 0:
             # Fail-safe timeout reached although ambulance still present.
+            # Cool the approach down so normal scheduling actually resumes.
+            self._emergency_cooldowns[self._emergency_approach] = self.emergency_cooldown
             self._end_emergency()
 
     def _end_emergency(self):
@@ -316,6 +328,11 @@ class TrafficScheduler:
         Emergency preemption takes precedence: if an emergency is active or an
         ambulance is detected, normal scheduling is suspended.
         """
+        for name in list(self._emergency_cooldowns):
+            self._emergency_cooldowns[name] -= delta
+            if self._emergency_cooldowns[name] <= 0:
+                del self._emergency_cooldowns[name]
+
         # 1. If an emergency is already in progress, advance its state machine.
         if self._emergency_approach is not None:
             self._advance_emergency(delta)
@@ -351,6 +368,15 @@ class TrafficScheduler:
         # In green: count down remaining green time.
         self.green_remaining -= delta
         if self.green_remaining <= 0:
+            # Give the strategy a chance to extend the green.
+            extension = self.strategy.on_green_end(
+                self.intersection, self.current_phase, self.intersection.time
+            )
+            if extension is HOLD:
+                return
+            if extension:
+                self.green_remaining += extension
+                return
             # Begin yellow transition.
             self.current_phase.start_yellow_transition()
             self._in_yellow = True

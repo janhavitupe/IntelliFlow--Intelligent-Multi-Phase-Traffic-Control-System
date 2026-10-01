@@ -35,7 +35,8 @@ def _ascii_curve(rewards, width=60):
 def main():
     n_episodes = int(sys.argv[1]) if len(sys.argv) > 1 else rl_config.TABULAR_EPISODES
 
-    agent, rewards = train_tabular(n_episodes=n_episodes, verbose=True)
+    agent, history = train_tabular(n_episodes=n_episodes, verbose=True)
+    rewards = history["episode_rewards"]
 
     # Report the first/early/last reward to show the trend.
     print("\n=== Reward curve summary ===")

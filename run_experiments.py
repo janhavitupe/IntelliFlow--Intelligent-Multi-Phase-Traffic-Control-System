@@ -14,16 +14,23 @@ The ONLY thing that differs between controllers is the scheduling policy
 (a pluggable BaseStrategy), so the comparison is apples-to-apples.
 
 Outputs:
-    1. A console performance table (Avg Wait / Avg Queue / Max Queue /
+    1. A console performance table (Avg Wait / Avg Queue / Max Lane Queue /
        Throughput / Congestion) - lower is better for Wait/Queue/Max/
        Congestion, higher is better for Throughput.
     2. 4 critical graphs (saved to images/):
        G1 avg_wait_comparison.png   - average waiting time (lower better)
        G2 throughput_comparison.png - throughput (higher better)
        G3 avg_queue_comparison.png  - average queue (lower better)
-       G4 rl_training_curves.png    - episode reward vs episode (ML learned)
+       G4 rl_training_curves.png    - greedy-policy validation wait vs
+                                      training episode, with Fixed/Density
+                                      reference lines (ML learned)
     3. results/results_table.csv   - the raw numbers
     4. results/model_cards.md      - the dataset/model documentation
+    5. models/                     - trained agents (q_table.npy, dqn.npz)
+
+Usage:
+    python run_experiments.py              # train, save models, evaluate
+    python run_experiments.py --use-saved  # skip training, load models/
 
 No results are fabricated or cherry-picked: every number comes from an
 actual simulation run.
@@ -31,6 +38,7 @@ actual simulation run.
 import os
 import csv
 import json
+import sys
 import time
 
 import numpy as np
@@ -40,7 +48,7 @@ from simulation import Simulation
 from strategies.fixed_timer_strategy import FixedTimerStrategy
 from strategies.density_strategy import DensityStrategy
 from strategies.rl_strategy import RLStrategy
-from rl.train import train_tabular, train_dqn
+from rl.train import train_tabular, train_dqn, score_policy
 from rl.agents import TabularQAgent
 from rl.dqn import DQNAgent
 
@@ -50,10 +58,12 @@ from rl.dqn import DQNAgent
 PROFILES = list(rl_config.PROFILES)
 SEEDS = [1, 2, 3]                 # multiple seeds for a stable average
 
-TRAIN_EPISODES = 150              # training budget for the RL agents
 EVAL_TICKS = 200                  # simulation ticks per evaluation run
 OUT_DIR = "results"
 IMG_DIR = "images"
+MODEL_DIR = "models"
+Q_TABLE_PATH = os.path.join(MODEL_DIR, "q_table.npy")
+DQN_PATH = os.path.join(MODEL_DIR, "dqn.npz")
 
 def run_controller(strategy, profile_key, seed, max_ticks):
     """Run one controller on one (profile, seed) and return scalar KPIs."""
@@ -88,33 +98,37 @@ def fresh_density():
 
 
 def train_and_wrap_tabular(seed):
-    agent, rewards = train_tabular(
-        n_episodes=TRAIN_EPISODES,
-        episode_length=rl_config.EPISODE_LENGTH,
-        seed=seed,
-        verbose=False,
-    )
-    rl = RLStrategy(agent=agent)
-    rl.reset()
-    return rl, rewards
+    agent, history = train_tabular(seed=seed, verbose=True)
+    agent.save(Q_TABLE_PATH)
+    return agent, history
 
 
 def train_and_wrap_dqn(seed):
-    agent, rewards = train_dqn(
+    agent, history = train_dqn(
         agent=DQNAgent(
             obs_dim=rl_config.OBS_DIM,
             n_actions=rl_config.NUM_PHASES,
             hidden=rl_config.DQN_HIDDEN_LAYERS,
             seed=seed,
         ),
-        n_episodes=TRAIN_EPISODES,
-        episode_length=rl_config.EPISODE_LENGTH,
         seed=seed,
-        verbose=False,
+        verbose=True,
     )
-    rl = RLStrategy(agent=agent)
-    rl.reset()
-    return rl, rewards
+    agent.save(DQN_PATH)
+    return agent, history
+
+
+def load_saved_agents():
+    """Load agents written by a previous training run."""
+    tabular = TabularQAgent()
+    tabular.load(Q_TABLE_PATH)
+    dqn = DQNAgent(
+        obs_dim=rl_config.OBS_DIM,
+        n_actions=rl_config.NUM_PHASES,
+        hidden=rl_config.DQN_HIDDEN_LAYERS,
+    )
+    dqn.load(DQN_PATH)
+    return tabular, dqn
 
 
 def collect_all(controllers, max_ticks):
@@ -179,7 +193,7 @@ def print_table(all_results):
           (len(PROFILES), len(SEEDS)))
     print("=" * 88)
     header = (f"{'Controller':<14}" + f"{'Avg Wait':>10}" + f"{'Avg Queue':>10}"
-              + f"{'Max Queue':>10}" + f"{'Throughput':>12}" + f"{'Congest':>9}")
+              + f"{'MaxLaneQ':>10}" + f"{'Throughput':>12}" + f"{'Congest':>9}")
     print(header)
     print("-" * 88)
     for name in names:
@@ -196,7 +210,7 @@ def print_table(all_results):
     best_cong = min(means, key=lambda n: means[n]["congestion"])
     print(f"  lowest avg wait : {best_wait}")
     print(f"  lowest avg queue: {best_q}")
-    print(f"  lowest max queue: {best_maxq}")
+    print(f"  lowest max lane queue: {best_maxq}")
     print(f"  highest throughput: {best_tp}")
     print(f"  lowest congestion: {best_cong}")
     return means
@@ -272,23 +286,25 @@ def make_graphs(all_results, training_curves, out_dir=IMG_DIR):
     fig.savefig(os.path.join(out_dir, "G3_avg_queue_comparison.png"))
     plt.close(fig)
 
-    # ---- Graph 4 : RL training curves (episode reward vs episode) ----
+    # ---- Graph 4 : RL learning curves (greedy validation wait) ----
+    # Raw episode rewards mix five profiles of very different difficulty,
+    # so the honest learning signal is the greedy policy's score on a fixed
+    # held-out validation set, with the rule-based controllers as reference.
     fig, ax = plt.subplots(figsize=(8, 5))
-    if training_curves:
-        for label, rewards in training_curves.items():
-            ax.plot(rewards, label=label, linewidth=1.5)
-            # Simple moving average overlay for readability.
-            window = max(1, len(rewards) // 10)
-            if len(rewards) >= window:
-                kernel = np.ones(window) / window
-                smooth = np.convolve(rewards, kernel, mode="valid")
-                ax.plot(range(window - 1, len(rewards)), smooth,
-                        linestyle="--", alpha=0.6)
-    ax.set_xlabel("Episode")
-    ax.set_ylabel("Cumulative episode reward (-sum queue)")
-    ax.set_title("RL Training Curves - Episode Reward (rising = learning)")
+    curves = (training_curves or {}).get("validation", {})
+    for label, points in curves.items():
+        eps, waits = zip(*points)
+        ax.plot(eps, waits, marker="o", markersize=3, linewidth=1.5, label=label)
+    styles = {"Fixed Timer": ":", "Density": "--"}
+    for label, wait in (training_curves or {}).get("reference", {}).items():
+        ax.axhline(wait, color="gray", linestyle=styles.get(label, "-."),
+                   linewidth=1.2, label=f"{label} (reference)")
+    ax.set_yscale("log")
+    ax.set_xlabel("Training episode")
+    ax.set_ylabel("Validation avg waiting time (log scale)")
+    ax.set_title("RL Learning Curves - greedy policy on held-out seeds (lower is better)")
     ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, which="both", alpha=0.3)
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "G4_rl_training_curves.png"))
     plt.close(fig)
@@ -321,29 +337,37 @@ def write_dataset_doc(all_results, training_curves, path):
     lines.append("")
     lines.append("- 4  queue lengths (per approach)")
     lines.append("- 4  percentile ranks (per approach)")
-    lines.append("- 4  starvation counters (per approach)")
+    lines.append("- 4  longest current wait (per approach; starvation signal)")
     lines.append("- 10 active-phase one-hot values")
-    lines.append("- 1  elapsed phase time")
-    lines.append("- **23 total**")
+    lines.append("- 1  elapsed green time of the active phase")
+    lines.append("- **23 total**, computed by one function in both training and inference")
     lines.append("")
-    lines.append("### Action space (10 discrete actions)")
+    lines.append("### Action space (10 discrete actions, extend-or-switch)")
     lines.append("")
-    lines.append("- PHASE_1 ... PHASE_10")
+    lines.append("- PHASE_1 ... PHASE_10, chosen each time the active green runs out.")
+    lines.append(f"- Choosing the active phase extends it by {rl_config.GREEN_EXTENSION:.0f} s; "
+                 f"choosing another starts it (after yellow) with {rl_config.MIN_GREEN:.0f} s green.")
+    lines.append(f"- Green is capped at {rl_config.MAX_GREEN:.0f} s. These are the same bounds "
+                 "the Density controller uses.")
     lines.append("")
     lines.append("### Reward")
     lines.append("")
     lines.append("```")
-    lines.append("reward = -sum(queue_lengths)")
+    lines.append(f"reward = -(sum over the step's ticks of total_queue * tick_seconds) / {rl_config.REWARD_SCALE:.0f}")
     lines.append("```")
+    lines.append("")
+    lines.append("Queueing delay in vehicle-seconds. Discount is per simulated second "
+                 f"(gamma = {rl_config.GAMMA_PER_SECOND} ** step_seconds); episode time "
+                 "limits are treated as truncation, not termination.")
     lines.append("")
     lines.append("## Models")
     lines.append("")
     lines.append("### 1. Tabular Q-Learning")
     lines.append("")
-    lines.append("- State discretization: queue LOW/MED/HIGH per approach "
-                 "(3^4 = 81) folded with last-active-phase (10) => **810 states**.")
-    lines.append("- Q-table shape: (810, 10).")
-    lines.append("- Updates: standard Q-learning with epsilon-greedy exploration.")
+    lines.append("- State discretization: queue LOW/MED/HIGH per approach (3^4 = 81) "
+                 "x active phase (10) x elapsed-green level (3) => **2430 states**.")
+    lines.append("- Q-table shape: (2430, 10).")
+    lines.append("- Updates: Q-learning with linearly decaying epsilon-greedy exploration.")
     lines.append("")
     lines.append("### 2. DQN (Deep Q-Network)")
     lines.append("")
@@ -357,15 +381,18 @@ def write_dataset_doc(all_results, training_curves, path):
     lines.append("       10 Q-values")
     lines.append("```")
     lines.append("")
-    lines.append("- Pure-numpy MLP (no deep-learning framework).")
-    lines.append("- Experience replay + target network + epsilon-greedy.")
+    lines.append("- Pure-numpy MLP and Adam optimizer (no deep-learning framework).")
+    lines.append("- Experience replay, target network, Double-DQN targets, Huber loss, "
+                 "gradient-norm clipping.")
+    lines.append(f"- Training: {rl_config.DQN_EPISODES} episodes of {rl_config.EPISODE_LENGTH} "
+                 "ticks; best checkpoint on held-out validation seeds is kept.")
     lines.append("")
     lines.append("## Model Performance Metrics")
     lines.append("")
     lines.append("Averaged over all profiles (" + ", ".join(PROFILES) + ") and seeds ("
                  + ", ".join(str(s) for s in SEEDS) + ").")
     lines.append("")
-    lines.append("| Controller | Avg Wait | Avg Queue | Max Queue | Throughput | Congestion |")
+    lines.append("| Controller | Avg Wait | Avg Queue | Max Lane Queue | Throughput | Congestion |")
     lines.append("|------------|----------|-----------|-----------|------------|------------|")
     for name in names:
         m = means[name]
@@ -374,14 +401,31 @@ def write_dataset_doc(all_results, training_curves, path):
                      f"{fmt(m['congestion'])} |")
     lines.append("")
     lines.append("_Wait/Queue/Congestion: lower is better. Throughput: higher is better._")
+    lines.append("_Avg Queue is the whole-intersection total (all 16 lanes); "
+                 "Max Lane Queue is the longest single lane seen during the run._")
+    lines.append("_RL rows come from a single training run (seed "
+                 f"{rl_config.SEED} / {rl_config.SEED + 1}); variance across training "
+                 "seeds is not yet included in this table._")
     lines.append("")
     lines.append("## Training curves")
     lines.append("")
-    for label, rewards in training_curves.items():
-        if rewards:
-            lines.append(f"- {label}: first episode reward {rewards[0]:.0f}, "
-                         f"last episode reward {rewards[-1]:.0f} "
-                         f"(peak {max(rewards):.0f}).")
+    validation = training_curves.get("validation", {})
+    if validation:
+        lines.append(f"Greedy policy scored every {rl_config.VALIDATION_EVERY} episodes on "
+                     f"held-out seeds {list(rl_config.VALIDATION_SEEDS)} "
+                     f"({rl_config.VALIDATION_TICKS} ticks per profile), "
+                     "average waiting time:")
+        lines.append("")
+        for label, points in validation.items():
+            start, end = points[0][1], points[-1][1]
+            best_ep, best = min(points, key=lambda p: p[1])
+            lines.append(f"- {label}: {start:.0f} untrained -> {end:.0f} after "
+                         f"{points[-1][0]} episodes; best {best:.0f} at episode "
+                         f"{best_ep} (this checkpoint is the one evaluated).")
+        for label, wait in training_curves.get("reference", {}).items():
+            lines.append(f"- {label} on the same validation set: {wait:.0f}.")
+    else:
+        lines.append("- Agents loaded from models/ (no training this run).")
     lines.append("")
 
     with open(path, "w") as f:
@@ -396,19 +440,32 @@ def main():
     print("=" * 88)
     print("PHASE 4 - CONTROLLED RL EXPERIMENTS")
     print(f"profiles={PROFILES} seeds={SEEDS} eval_ticks={EVAL_TICKS}")
-    print(f"RL training budget: {TRAIN_EPISODES} episodes per agent")
+    print(f"RL training budget: {rl_config.TABULAR_EPISODES} (tabular) / "
+          f"{rl_config.DQN_EPISODES} (DQN) episodes of {rl_config.EPISODE_LENGTH} ticks")
     print("=" * 88)
 
-    # ---- Train the RL agents (inference-time wrappers) ----
-    print("\n[1/3] Training RL agents...")
-    tabular_rl, tabular_rewards = train_and_wrap_tabular(rl_config.SEED)
-    dqn_rl, dqn_rewards = train_and_wrap_dqn(rl_config.SEED + 1)
-    training_curves = {
-        "tabular_q": tabular_rewards,
-        "dqn": dqn_rewards,
-    }
-    print(f"  tabular last reward = {tabular_rewards[-1]:.0f}")
-    print(f"  dqn last reward     = {dqn_rewards[-1]:.0f}")
+    # ---- Train (or load) the RL agents ----
+    if "--use-saved" in sys.argv:
+        print("\n[1/3] Loading RL agents from models/ ...")
+        tabular_agent, dqn_agent = load_saved_agents()
+        training_curves = {}
+    else:
+        print("\n[1/3] Training RL agents...")
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        print(" tabular Q-learning:")
+        tabular_agent, tabular_hist = train_and_wrap_tabular(rl_config.SEED)
+        print(" DQN:")
+        dqn_agent, dqn_hist = train_and_wrap_dqn(rl_config.SEED + 1)
+        training_curves = {
+            "validation": {
+                "Q-Learning": tabular_hist["validation"],
+                "DQN": dqn_hist["validation"],
+            },
+            "reference": {
+                "Fixed Timer": score_policy(fresh_fixed_timer),
+                "Density": score_policy(fresh_density),
+            },
+        }
 
     # ---- Evaluate all 4 controllers ----
     # Note: RL strategies self-drive in the Simulation (argmax over the
@@ -417,8 +474,10 @@ def main():
     controllers = {
         "Fixed Timer": fresh_fixed_timer,
         "Density": fresh_density,
-        "Q-Learning": lambda: tabular_rl,
-        "DQN": lambda: dqn_rl,
+        # Fresh RLStrategy per run: it carries per-run bookkeeping
+        # (starvation counters, phase start time) that must not leak.
+        "Q-Learning": lambda: RLStrategy(agent=tabular_agent),
+        "DQN": lambda: RLStrategy(agent=dqn_agent),
     }
     all_results = collect_all(controllers, EVAL_TICKS)
 

@@ -4,9 +4,10 @@ agents.py
 Reinforcement-learning agents for the traffic RL environment.
 
 Stage 1: TabularQAgent
-    Q-learning over a discretized state (810 buckets = 3^4 queue levels x
-    10 last-phase). epsilon-greedy action selection. Simple, fast, fully
-    interpretable - the recommended sanity-check baseline before DQN.
+    Q-learning over a discretized state (2430 buckets = 3^4 queue levels x
+    10 active phase x 3 elapsed-green levels). epsilon-greedy action
+    selection. Simple, fast, fully interpretable - the recommended
+    sanity-check baseline before DQN.
 
 The agent is usable in two modes:
     - training: Q-learning updates on (s, a, r, s') transitions.
@@ -18,6 +19,7 @@ import random
 import numpy as np
 
 from config import rl as rl_config
+from env.state_builder import Discretizer
 
 
 class TabularQAgent:
@@ -25,25 +27,23 @@ class TabularQAgent:
     Tabular Q-learning agent.
 
     Args:
-        n_states (int): number of discrete states (810 by default).
+        n_states (int): number of discrete states (Discretizer.N_STATES).
         n_actions (int): number of actions (10 phases).
         gamma (float): discount factor.
         alpha (float): learning rate.
         epsilon (float): initial exploration probability.
         epsilon_end (float): minimum exploration probability.
-        epsilon_decay (float): per-episode decay factor.
         seed (int|None): optional RNG seed for reproducibility.
     """
 
     def __init__(
         self,
-        n_states=810,
+        n_states=Discretizer.N_STATES,
         n_actions=10,
         gamma=None,
         alpha=None,
         epsilon=None,
         epsilon_end=None,
-        epsilon_decay=None,
         seed=None,
     ):
         self.n_states = n_states
@@ -53,11 +53,6 @@ class TabularQAgent:
         self.epsilon = epsilon if epsilon is not None else rl_config.EPSILON_START
         self.epsilon_end = (
             epsilon_end if epsilon_end is not None else rl_config.EPSILON_END
-        )
-        self.epsilon_decay = (
-            epsilon_decay
-            if epsilon_decay is not None
-            else rl_config.EPSILON_DECAY
         )
 
         # Q-table: [state][action].
@@ -83,21 +78,42 @@ class TabularQAgent:
     # Q-learning update
     # ------------------------------------------------------------------
 
-    def update(self, state, action, reward, next_state, done):
-        """Apply one Q-learning update for a transition."""
+    def update(self, state, action, reward, next_state, terminal, discount=None):
+        """
+        Apply one Q-learning update for a transition.
+
+        `terminal` means the task truly ended. A time-limit cut-off is NOT
+        terminal - traffic keeps flowing - so the caller passes False there
+        and the update still bootstraps from next_state.
+
+        `discount` is this transition's discount factor (it depends on how
+        long the step lasted); defaults to the per-step gamma.
+        """
+        discount = self.gamma if discount is None else discount
         best_next = 0.0
-        if not done:
+        if not terminal:
             best_next = float(np.max(self.Q[next_state]))
-        target = reward + self.gamma * best_next
+        target = reward + discount * best_next
         self.Q[state, action] += self.alpha * (target - self.Q[state, action])
 
     # ------------------------------------------------------------------
-    # Exploration schedule
+    # Persistence
     # ------------------------------------------------------------------
 
-    def decay_epsilon(self):
-        """Decay epsilon after each episode."""
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+    def get_weights(self):
+        """Snapshot of the learned parameters (for best-checkpoint keeping)."""
+        return self.Q.copy()
+
+    def set_weights(self, weights):
+        self.Q = weights.copy()
+
+    def save(self, path):
+        """Save the Q-table to a .npy file."""
+        np.save(path, self.Q)
+
+    def load(self, path):
+        """Load a Q-table saved by save()."""
+        self.Q = np.load(path)
 
     def __repr__(self):
         return (

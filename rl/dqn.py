@@ -20,8 +20,10 @@ Design:
     - MLP.forward(x)  : x (N x D) -> Q(s, a) (N x A), caching activations.
     - MLP.backward(d): accumulate grads for a batch of output gradients.
     - MLP.step(lr)    : one SGD update from accumulated grads.
+    - Adam            : Adam optimizer over an MLP's parameters.
     - ReplayBuffer    : fixed-capacity ring buffer of transitions.
-    - DQNAgent        : epsilon-greedy, replay, target network, TD learning.
+    - DQNAgent        : epsilon-greedy, replay, target network, Double-DQN
+                        targets, Huber loss, gradient-norm clipping.
 """
 import numpy as np
 
@@ -138,8 +140,49 @@ class MLP:
         return f"MLP({self.n_input}->{self.hidden}->{self.n_output})"
 
 
+class Adam:
+    """
+    Adam optimizer for an MLP's accumulated gradients.
+
+    Per-parameter adaptive step sizes make training insensitive to the raw
+    reward scale, which plain SGD is not (large TD errors -> huge steps).
+    """
+
+    def __init__(self, net, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8):
+        self.net = net
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.t = 0
+        self.m = {i: {k: np.zeros_like(v) for k, v in p.items()}
+                  for i, p in net.params.items()}
+        self.v = {i: {k: np.zeros_like(v) for k, v in p.items()}
+                  for i, p in net.params.items()}
+
+    def step(self, max_grad_norm=None):
+        """Apply one update; optionally clip the global gradient norm first."""
+        grads = {i: {"W": g["dW"], "b": g["db"]} for i, g in self.net.grads.items()}
+        if max_grad_norm is not None:
+            norm = np.sqrt(sum(float((g ** 2).sum())
+                               for layer in grads.values() for g in layer.values()))
+            if norm > max_grad_norm:
+                scale = max_grad_norm / norm
+                grads = {i: {k: g * scale for k, g in layer.items()}
+                         for i, layer in grads.items()}
+
+        self.t += 1
+        for i, layer in grads.items():
+            for k, g in layer.items():
+                self.m[i][k] = self.beta1 * self.m[i][k] + (1 - self.beta1) * g
+                self.v[i][k] = self.beta2 * self.v[i][k] + (1 - self.beta2) * g * g
+                m_hat = self.m[i][k] / (1 - self.beta1 ** self.t)
+                v_hat = self.v[i][k] / (1 - self.beta2 ** self.t)
+                self.net.params[i][k] -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+
+
 class ReplayBuffer:
-    """Fixed-capacity ring buffer of (state, action, reward, next_state, done)."""
+    """Fixed-capacity ring buffer of (s, a, r, s', done, discount)."""
 
     def __init__(self, capacity=20000, seed=None):
         self.capacity = capacity
@@ -147,10 +190,10 @@ class ReplayBuffer:
         self._pos = 0
         self._rng = np.random.default_rng(seed)
 
-    def push(self, s, a, r, s2, done):
+    def push(self, s, a, r, s2, done, discount):
         """Store one transition, evicting the oldest when full."""
         item = (np.asarray(s, dtype=np.float64), a, float(r),
-                np.asarray(s2, dtype=np.float64), bool(done))
+                np.asarray(s2, dtype=np.float64), bool(done), float(discount))
         if len(self._data) < self.capacity:
             self._data.append(item)
         else:
@@ -190,7 +233,6 @@ class DQNAgent:
         alpha=None,
         epsilon=None,
         epsilon_end=None,
-        epsilon_decay=None,
         replay_size=None,
         batch_size=None,
         target_update=None,
@@ -203,9 +245,6 @@ class DQNAgent:
         alpha = alpha if alpha is not None else rl_config.DQN_LEARNING_RATE
         epsilon = epsilon if epsilon is not None else rl_config.EPSILON_START
         epsilon_end = epsilon_end if epsilon_end is not None else rl_config.EPSILON_END
-        epsilon_decay = (
-            epsilon_decay if epsilon_decay is not None else rl_config.EPSILON_DECAY
-        )
         replay_size = (
             replay_size if replay_size is not None else rl_config.DQN_REPLAY_SIZE
         )
@@ -220,6 +259,9 @@ class DQNAgent:
         self._sync_target()
 
         self.buffer = ReplayBuffer(replay_size, seed=np_seed)
+        self.optimizer = Adam(self.policy_net, lr=alpha)
+        self.huber_delta = rl_config.DQN_HUBER_DELTA
+        self.grad_clip = rl_config.DQN_GRAD_CLIP
 
         self.obs_dim = obs_dim
         self.n_actions = n_actions
@@ -227,10 +269,9 @@ class DQNAgent:
         self.lr = alpha
         self.epsilon = epsilon
         self.epsilon_end = epsilon_end
-        self.epsilon_decay = epsilon_decay
         self.batch_size = batch_size
         self.target_update_steps = target_update
-        self._step_count = 0
+        self._train_steps = 0
         self._rng = np.random.default_rng(np_seed)
 
     # -------- target sync --------
@@ -255,45 +296,78 @@ class DQNAgent:
 
     # -------- training step --------
 
-    def store(self, s, a, r, s2, done):
-        """Store a transition and train when the buffer is warm."""
-        self.buffer.push(s, a, r, s2, done)
-        self._step_count += 1
+    def store(self, s, a, r, s2, terminal, discount=None):
+        """
+        Store a transition and train when the buffer is warm.
+
+        `terminal` means the task truly ended (no bootstrapping). A
+        time-limit cut-off is not terminal; pass False for it.
+        `discount` is this transition's discount factor (it depends on how
+        long the step lasted); defaults to the per-step gamma.
+        """
+        discount = self.gamma if discount is None else discount
+        self.buffer.push(s, a, r, s2, terminal, discount)
         if self.buffer.is_ready(self.batch_size):
             self._train_once()
-        if self._step_count % self.target_update_steps == 0:
-            self._sync_target()
+            self._train_steps += 1
+            if self._train_steps % self.target_update_steps == 0:
+                self._sync_target()
 
     def _train_once(self):
-        """Sample a batch and apply one SGD step on the TD-error objective."""
+        """Sample a batch and apply one Adam step on the Huber TD objective."""
         batch = self.buffer.sample(self.batch_size)
         states = np.stack([t[0] for t in batch])     # (B, D)
         actions = np.array([t[1] for t in batch])    # (B,)
         rewards = np.array([t[2] for t in batch])    # (B,)
         nexts = np.stack([t[3] for t in batch])      # (B, D)
         dones = np.array([t[4] for t in batch])      # (B,)
+        discounts = np.array([t[5] for t in batch])  # (B,)
 
-        # Target = r + gamma * max_a' Q_target(s', a').
-        q_next = self.target_net.predict(nexts)      # (B, A)
-        max_q = q_next.max(axis=1)                   # (B,)
-        targets = rewards + self.gamma * max_q * (1.0 - dones)
+        # Double DQN: the online net picks a', the target net evaluates it.
+        # Using max over the target net alone systematically overestimates.
+        rows = np.arange(self.batch_size)
+        best_next = self.policy_net.predict(nexts).argmax(axis=1)   # (B,)
+        q_next = self.target_net.predict(nexts)[rows, best_next]    # (B,)
+        targets = rewards + discounts * q_next * (1.0 - dones)
 
-        # Forward on the policy net, then backprop the MSE for chosen actions.
+        # Forward on the policy net (must come after the predict above,
+        # which overwrites the activation cache used by backward).
         q_all = self.policy_net.forward(states)      # (B, A)
         self.policy_net.zero_grad()
         dq = np.zeros_like(q_all)
-        # Gradient of 0.5*sum((target - q_a)^2) w.r.t outputs.
-        dq[np.arange(self.batch_size), actions] = (
-            q_all[np.arange(self.batch_size), actions] - targets
-        )
+        # Huber loss gradient: the TD error itself when small, clipped to
+        # +/-delta when large, so outlier transitions cannot blow up updates.
+        td = q_all[rows, actions] - targets
+        dq[rows, actions] = np.clip(td, -self.huber_delta, self.huber_delta)
         self.policy_net.backward(dq / self.batch_size)
-        self.policy_net.step(self.lr)
+        self.optimizer.step(max_grad_norm=self.grad_clip)
 
-    # -------- exploration schedule --------
+    # -------- persistence --------
 
-    def decay_epsilon(self):
-        """Decay epsilon after each episode."""
-        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
+    def get_weights(self):
+        """Snapshot of the policy weights (for best-checkpoint keeping)."""
+        return {i: {k: v.copy() for k, v in p.items()}
+                for i, p in self.policy_net.params.items()}
+
+    def set_weights(self, weights):
+        for i, p in weights.items():
+            for k, v in p.items():
+                self.policy_net.params[i][k] = v.copy()
+        self._sync_target()
+
+    def save(self, path):
+        """Save the policy network weights to an .npz file."""
+        arrays = {f"{k}{i}": v for i, p in self.policy_net.params.items()
+                  for k, v in p.items()}
+        np.savez(path, **arrays)
+
+    def load(self, path):
+        """Load policy weights saved by save() (and sync the target net)."""
+        data = np.load(path)
+        for i, p in self.policy_net.params.items():
+            for k in p:
+                p[k] = data[f"{k}{i}"].copy()
+        self._sync_target()
 
     def __repr__(self):
         return f"DQNAgent({self.policy_net}, eps={self.epsilon:.3f})"
