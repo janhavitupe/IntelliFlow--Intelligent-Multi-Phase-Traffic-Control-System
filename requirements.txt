@@ -4,8 +4,8 @@ numpy
 # Tests (python -m pytest)
 pytest
 
-# Console rendering (optional but recommended)
-# matplotlib
+# Charts produced by run_experiments.py
+matplotlib
 
 # --- Future integrations (not required to run the simulator now) ---
 # opencv-python            # YOLO/OpenCV vehicle detection

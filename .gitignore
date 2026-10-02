@@ -16,3 +16,6 @@ models/
 
 # Test cache
 .pytest_cache/
+
+# Output of plot_rewards.py
+reward_curve.png

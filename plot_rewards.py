@@ -1,9 +1,11 @@
 """
 plot_rewards.py
 
-Plots the per-episode cumulative reward curve from tabular Q-learning
-training. A rising reward curve is the single most convincing piece of
-evidence that the RL is actually working.
+Quick look at tabular Q-learning: trains for n episodes and plots the
+per-episode reward (saved to reward_curve.png). Episodes rotate through
+profiles of very different difficulty, so this curve is noisy; the honest
+learning curve is the held-out validation curve produced by
+run_experiments.py (images/G4_rl_training_curves.png).
 
 Usage:
     python plot_rewards.py [n_episodes]
@@ -71,7 +73,7 @@ def main():
                 linewidth=2,
             )
         plt.xlabel("Episode")
-        plt.ylabel("Cumulative reward ( -sum(queue) )")
+        plt.ylabel("Episode reward (-queueing delay / 1000)")
         plt.title("Tabular Q-learning reward curve")
         plt.legend()
         plt.grid(True, alpha=0.3)

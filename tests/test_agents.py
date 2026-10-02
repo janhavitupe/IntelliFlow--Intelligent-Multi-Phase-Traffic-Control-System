@@ -104,7 +104,7 @@ def test_adam_fits_a_small_regression():
 
 def test_dqn_learns_a_one_step_bandit():
     """Action 3 pays 1, every other action pays 0: the greedy action must be 3."""
-    agent = DQNAgent(obs_dim=4, n_actions=5, seed=0, batch_size=32)
+    agent = DQNAgent(obs_dim=4, n_actions=5, seed=0, batch_size=32, value_rescaling=False)
     rng = np.random.default_rng(0)
     s = np.ones(4)
     for _ in range(1500):
@@ -113,6 +113,28 @@ def test_dqn_learns_a_one_step_bandit():
     q = agent.policy_net.predict(s)[0]
     assert int(np.argmax(q)) == 3
     assert q[3] == pytest.approx(1.0, abs=0.15)
+
+
+def test_value_transform_is_monotonic_and_exactly_invertible():
+    from rl.dqn import value_transform, value_transform_inverse
+    x = np.array([-1e4, -200.0, -19.6, -0.21, -1e-3, 0.0, 0.5, 30.0])
+    h = value_transform(x, 1e-2)
+    assert np.all(np.diff(h) > 0)                       # order (argmax) preserved
+    np.testing.assert_allclose(value_transform_inverse(h, 1e-2), x, rtol=1e-9, atol=1e-9)
+
+
+def test_dqn_with_value_rescaling_learns_the_bandit():
+    """The network outputs h(Q); the greedy action must still be the best one."""
+    from rl.dqn import value_transform_inverse
+    agent = DQNAgent(obs_dim=4, n_actions=5, seed=0, batch_size=32, value_rescaling=True)
+    rng = np.random.default_rng(0)
+    s = np.ones(4)
+    for _ in range(1500):
+        a = int(rng.integers(5))
+        agent.store(s, a, 5.0 if a == 3 else 0.0, s, terminal=True)
+    h_q = agent.policy_net.predict(s)[0]
+    assert int(np.argmax(h_q)) == 3
+    assert value_transform_inverse(h_q[3], agent.rescale_eps) == pytest.approx(5.0, abs=0.5)
 
 
 def test_dqn_save_load_and_weight_snapshots(tmp_path):

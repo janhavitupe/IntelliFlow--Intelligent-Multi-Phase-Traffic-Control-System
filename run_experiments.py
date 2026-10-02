@@ -7,41 +7,60 @@ featured in the submission.
 It trains the RL agents (tabular Q-learning and DQN) and then evaluates all
 four controllers through the SAME traffic simulator under IDENTICAL:
     - traffic profiles (LIGHT / NORMAL / RUSH_HOUR / NIGHT / CUSTOM)
-    - simulation duration (max_ticks per run)
-    - seeds (multiple, for a stable average)
+    - simulation duration (EVAL_TICKS per run)
+    - test seeds (TEST_SEEDS, disjoint from training and validation seeds)
 
 The ONLY thing that differs between controllers is the scheduling policy
 (a pluggable BaseStrategy), so the comparison is apples-to-apples.
 
+Uncertainty is reported, not hidden:
+    - Each RL agent is trained from TRAIN_SEEDS independent seeds (in
+      parallel); RL rows show mean +/- std across those training runs.
+    - Results are broken down per profile, and summarized as the mean
+      % improvement over Fixed Timer across profiles, so the heavily
+      oversaturated RUSH_HOUR profile cannot dominate a single average.
+    - DQN vs Density gets a paired bootstrap 95% confidence interval.
+
+Primary metric: average delay per vehicle (seconds), counting vehicles still
+queued at the end with the delay accrued so far.
+
 Outputs:
-    1. A console performance table (Avg Wait / Avg Queue / Max Lane Queue /
-       Throughput / Congestion) - lower is better for Wait/Queue/Max/
-       Congestion, higher is better for Throughput.
-    2. 4 critical graphs (saved to images/):
-       G1 avg_wait_comparison.png   - average waiting time (lower better)
-       G2 throughput_comparison.png - throughput (higher better)
-       G3 avg_queue_comparison.png  - average queue (lower better)
-       G4 rl_training_curves.png    - greedy-policy validation wait vs
-                                      training episode, with Fixed/Density
-                                      reference lines (ML learned)
-    3. results/results_table.csv   - the raw numbers
-    4. results/model_cards.md      - the dataset/model documentation
-    5. models/                     - trained agents (q_table.npy, dqn.npz)
+    1. Console tables.
+    2. Graphs (images/):
+       G1_avg_delay_comparison.png - avg delay per vehicle (+/- training std)
+       G2_throughput_comparison.png - throughput
+       G3_delay_by_profile.png     - avg delay per vehicle, per profile
+       G4_rl_training_curves.png   - validation delay vs training episode
+    3. results/results_table.csv   - one row per run (raw numbers)
+    4. results/model_cards.md      - dataset / model / results documentation
+    5. models/                     - trained agents, one file per seed
 
 Usage:
     python run_experiments.py              # train, save models, evaluate
     python run_experiments.py --use-saved  # skip training, load models/
 
+Environment variables (inherited by the worker processes):
+    EXPERIMENTS_OUT=<dir>   write results/, images/, models/ under <dir>
+    EXPERIMENTS_QUICK=1     tiny smoke-test configuration (seconds, not minutes)
+
 No results are fabricated or cherry-picked: every number comes from an
 actual simulation run.
 """
-import os
 import csv
 import json
+import math
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 
-import numpy as np
+# One BLAS thread per process, set BEFORE numpy loads (workers inherit it).
+# The networks are tiny, so threading gains nothing, and N processes x
+# (one OpenBLAS thread + buffers per core) exhausts memory and kills workers.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
+import numpy as np  # noqa: E402  (must follow the thread limits above)
 
 from config import rl as rl_config
 from simulation import Simulation
@@ -56,447 +75,516 @@ from rl.dqn import DQNAgent
 # Experiment configuration
 # ---------------------------------------------------------------------------
 PROFILES = list(rl_config.PROFILES)
-SEEDS = [1, 2, 3]                 # multiple seeds for a stable average
+TEST_SEEDS = [1, 2, 3, 4, 5]
+TRAIN_SEEDS = [42, 7, 123]        # independent training runs per RL agent
+EVAL_TICKS = 1200                 # 10 simulated minutes per evaluation run
+TRAIN_EPISODES = None             # None = config default
+TRAIN_EPISODE_LENGTH = None
 
-EVAL_TICKS = 200                  # simulation ticks per evaluation run
-OUT_DIR = "results"
-IMG_DIR = "images"
-MODEL_DIR = "models"
-Q_TABLE_PATH = os.path.join(MODEL_DIR, "q_table.npy")
-DQN_PATH = os.path.join(MODEL_DIR, "dqn.npz")
+QUICK = os.environ.get("EXPERIMENTS_QUICK") == "1"
+if QUICK:
+    TEST_SEEDS, TRAIN_SEEDS, EVAL_TICKS = [1], [42, 7], 200
+    TRAIN_EPISODES, TRAIN_EPISODE_LENGTH = 2, 200
+
+_ROOT = os.environ.get("EXPERIMENTS_OUT", ".")
+OUT_DIR = os.path.join(_ROOT, "results")
+IMG_DIR = os.path.join(_ROOT, "images")
+MODEL_DIR = os.path.join(_ROOT, "models")
+
+RULE_BASED = ["Fixed Timer", "Density"]
+RL_AGENTS = ["Q-Learning", "DQN"]
+CONTROLLERS = RULE_BASED + RL_AGENTS
+
+# (key, label, higher_is_better)
+METRICS = [
+    ("avg_delay", "Avg delay/veh (s)", False),
+    ("p95_delay", "P95 delay (s)", False),
+    ("max_delay", "Max delay (s)", False),
+    ("ambulance_delay", "Ambulance delay (s)", False),
+    ("avg_queue", "Avg queue (veh)", False),
+    ("throughput", "Throughput (veh/s)", True),
+    ("queued_veh_s", "Queued veh-s", False),
+]
+METRIC_KEYS = [k for k, _, _ in METRICS]
+
+
+# ---------------------------------------------------------------------------
+# Single runs
+# ---------------------------------------------------------------------------
 
 def run_controller(strategy, profile_key, seed, max_ticks):
     """Run one controller on one (profile, seed) and return scalar KPIs."""
-    sim = Simulation(
-        profile_key=profile_key,
-        seed=seed,
-        max_ticks=max_ticks,
-        live=False,
-        log_to_csv=False,
-        strategy=strategy,
-    )
+    sim = Simulation(profile_key=profile_key, seed=seed, max_ticks=max_ticks,
+                     live=False, log_to_csv=False, strategy=strategy)
     for _ in range(max_ticks):
         sim.step()
-    s = sim.analytics.summary()
-    mq = s.get("max_queue_by_movement", {})
-    max_q = max(mq.values()) if isinstance(mq, dict) and mq else 0
+    a = sim.analytics
+    amb = a.ambulance_average_delay
     return {
-        "avg_wait": float(s.get("average_waiting_time", 0.0)),
-        "avg_queue": float(s.get("average_queue_length", 0.0)),
-        "max_queue": float(max_q),
-        "throughput": float(s.get("throughput", 0.0)),
-        "congestion": float(s.get("congestion_ratio", 0.0)),
+        "avg_delay": a.average_delay,
+        "p95_delay": a.p95_delay,
+        "max_delay": a.max_delay,
+        "ambulance_delay": float("nan") if amb is None else amb,
+        "avg_queue": a.average_queue_length,
+        "throughput": a.throughput,
+        "queued_veh_s": a.average_waiting_time,
     }
 
 
-def fresh_fixed_timer():
-    return FixedTimerStrategy()
+def history_path():
+    return os.path.join(MODEL_DIR, "training_history.json")
 
 
-def fresh_density():
-    return DensityStrategy()
-
-
-def train_and_wrap_tabular(seed):
-    agent, history = train_tabular(seed=seed, verbose=True)
-    agent.save(Q_TABLE_PATH)
-    return agent, history
-
-
-def train_and_wrap_dqn(seed):
-    agent, history = train_dqn(
-        agent=DQNAgent(
-            obs_dim=rl_config.OBS_DIM,
-            n_actions=rl_config.NUM_PHASES,
-            hidden=rl_config.DQN_HIDDEN_LAYERS,
-            seed=seed,
-        ),
-        seed=seed,
-        verbose=True,
-    )
-    agent.save(DQN_PATH)
-    return agent, history
-
-
-def load_saved_agents():
-    """Load agents written by a previous training run."""
-    tabular = TabularQAgent()
-    tabular.load(Q_TABLE_PATH)
-    dqn = DQNAgent(
-        obs_dim=rl_config.OBS_DIM,
-        n_actions=rl_config.NUM_PHASES,
-        hidden=rl_config.DQN_HIDDEN_LAYERS,
-    )
-    dqn.load(DQN_PATH)
-    return tabular, dqn
-
-
-def collect_all(controllers, max_ticks):
-    """
-    For each controller, run it on every (profile, seed) and aggregate.
-
-    Returns:
-        dict: controller_name -> list of per-(profile, seed) KPI dicts.
-    """
-    all_results = {name: [] for name in controllers}
-    total = len(controllers) * len(PROFILES) * len(SEEDS)
-    done = 0
-    for name, strategy_factory in controllers.items():
-        # A fresh strategy per (profile, seed) run so RL strategies are not
-        # required to be stateless across runs (deterministic self-drive).
-        for profile in PROFILES:
-            for seed in SEEDS:
-                strategy = strategy_factory()
-                kpi = run_controller(strategy, profile, seed, max_ticks)
-                kpi["profile"] = profile
-                kpi["seed"] = seed
-                kpi["controller"] = name
-                all_results[name].append(kpi)
-                done += 1
-        print(f"  [{name}] completed ({len(SEEDS)} seeds x {len(PROFILES)} profiles)")
-    print(f"  total runs: {done}/{total}")
-    return all_results
-
-
-def mean_across_profiles_seeds(rows):
-    """Average scalar KPIs across all (profile, seed) runs of a controller."""
-    n = len(rows)
-    return {
-        k: sum(r[k] for r in rows) / n for k in
-        ("avg_wait", "avg_queue", "max_queue", "throughput", "congestion")
+def save_training(training):
+    """Persist learning curves + references so --use-saved can report them."""
+    data = {
+        "validation": {f"{n}|{s}": pts for (n, s), pts in training["validation"].items()},
+        "reference": training["reference"],
     }
+    with open(history_path(), "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
 
 
-def write_csv(all_results, path):
+def load_training():
+    if not os.path.exists(history_path()):
+        return None
+    with open(history_path(), encoding="utf-8") as f:
+        data = json.load(f)
+    validation = {}
+    for key, pts in data["validation"].items():
+        name, seed = key.split("|")
+        validation[(name, int(seed))] = [tuple(p) for p in pts]
+    return {"validation": validation, "reference": data["reference"]}
+
+
+def model_path(name, train_seed):
+    ext = "npy" if name == "Q-Learning" else "npz"
+    slug = "q_table" if name == "Q-Learning" else "dqn"
+    return os.path.join(MODEL_DIR, f"{slug}_seed{train_seed}.{ext}")
+
+
+def new_agent(name, seed=None):
+    if name == "Q-Learning":
+        return TabularQAgent(seed=seed)
+    return DQNAgent(obs_dim=rl_config.OBS_DIM, n_actions=rl_config.NUM_PHASES,
+                    hidden=rl_config.DQN_HIDDEN_LAYERS, seed=seed)
+
+
+def load_agent(name, train_seed):
+    agent = new_agent(name)
+    agent.load(model_path(name, train_seed))
+    return agent
+
+
+def strategy_factory(name, train_seed=None):
+    if name == "Fixed Timer":
+        return FixedTimerStrategy
+    if name == "Density":
+        return DensityStrategy
+    agent = load_agent(name, train_seed)
+    return lambda: RLStrategy(agent=agent)
+
+
+# ---------------------------------------------------------------------------
+# Parallel workers (top-level so they can be pickled on Windows)
+# ---------------------------------------------------------------------------
+
+def _train_worker(job):
+    name, train_seed = job
+    train = train_tabular if name == "Q-Learning" else train_dqn
+    agent, history = train(agent=new_agent(name, train_seed), seed=train_seed, verbose=False,
+                           n_episodes=TRAIN_EPISODES, episode_length=TRAIN_EPISODE_LENGTH)
+    agent.save(model_path(name, train_seed))
+    return name, train_seed, history
+
+
+def _eval_worker(job):
+    name, train_seed = job
+    factory = strategy_factory(name, train_seed)
+    rows = []
+    for profile in PROFILES:
+        for seed in TEST_SEEDS:
+            kpi = run_controller(factory(), profile, seed, EVAL_TICKS)
+            kpi.update(controller=name, train_seed=train_seed, profile=profile, seed=seed)
+            rows.append(kpi)
+    return rows
+
+
+def _reference_worker(name):
+    return name, score_policy(strategy_factory(name))
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
+
+def nanmean(values):
+    values = [v for v in values if not math.isnan(v)]
+    return sum(values) / len(values) if values else float("nan")
+
+
+def controller_summary(rows, name):
+    """
+    Overall mean of every metric for one controller.
+
+    For RL, the mean is taken per training seed first; the reported value is
+    the mean of those and `std` is their spread (training-seed variance).
+    """
+    mine = [r for r in rows if r["controller"] == name]
+    seeds = sorted({r["train_seed"] for r in mine}, key=str)
+    per_seed = [{k: nanmean([r[k] for r in mine if r["train_seed"] == s]) for k in METRIC_KEYS}
+                for s in seeds]
+    mean = {k: nanmean([p[k] for p in per_seed]) for k in METRIC_KEYS}
+    std = {k: float(np.std([p[k] for p in per_seed])) if len(per_seed) > 1 else 0.0
+           for k in METRIC_KEYS}
+    return mean, std, per_seed
+
+
+def per_profile(rows, name, key="avg_delay"):
+    return {p: nanmean([r[key] for r in rows if r["controller"] == name and r["profile"] == p])
+            for p in PROFILES}
+
+
+def improvement_vs_fixed(rows, name):
+    """Mean over profiles of the % reduction in avg delay vs Fixed Timer."""
+    fixed, mine = per_profile(rows, "Fixed Timer"), per_profile(rows, name)
+    return sum(100.0 * (fixed[p] - mine[p]) / fixed[p] for p in PROFILES) / len(PROFILES)
+
+
+def paired_bootstrap_ci(diffs, n_boot=10_000, seed=0):
+    """Mean and 95% percentile-bootstrap CI of paired differences."""
+    diffs = np.asarray(diffs, dtype=float)
+    rng = np.random.default_rng(seed)
+    means = rng.choice(diffs, size=(n_boot, len(diffs)), replace=True).mean(axis=1)
+    return float(diffs.mean()), float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
+def paired_delay_diffs(rows, a, b):
+    """
+    avg_delay(a) - avg_delay(b) for each (profile, test seed) pair, averaging
+    over training seeds where a controller has several.
+    """
+    diffs = []
+    for p in PROFILES:
+        for s in TEST_SEEDS:
+            va = nanmean([r["avg_delay"] for r in rows
+                          if r["controller"] == a and r["profile"] == p and r["seed"] == s])
+            vb = nanmean([r["avg_delay"] for r in rows
+                          if r["controller"] == b and r["profile"] == p and r["seed"] == s])
+            diffs.append(va - vb)
+    return diffs
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+def fmt(mean, std=None, digits=1):
+    if math.isnan(mean):
+        return "n/a"
+    if std:
+        return f"{mean:.{digits}f} ± {std:.{digits}f}"
+    return f"{mean:.{digits}f}"
+
+
+def write_csv(rows, path):
+    fields = ["controller", "train_seed", "profile", "seed"] + METRIC_KEYS
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "controller", "profile", "seed",
-            "avg_wait", "avg_queue", "max_queue", "throughput", "congestion",
-        ])
-        for name, rows in all_results.items():
-            for r in rows:
-                writer.writerow([
-                    name, r["profile"], r["seed"],
-                    round(r["avg_wait"], 3), round(r["avg_queue"], 3),
-                    round(r["max_queue"], 3), round(r["throughput"], 3),
-                    round(r["congestion"], 3),
-                ])
+        writer.writerow(fields)
+        for r in rows:
+            writer.writerow(["" if r[k] is None else
+                             round(r[k], 4) if isinstance(r[k], float) else r[k]
+                             for k in fields])
 
 
-def print_table(all_results):
-    names = list(all_results.keys())
-    means = {n: mean_across_profiles_seeds(all_results[n]) for n in names}
+def print_tables(rows):
+    print("\n" + "=" * 100)
+    print(f"OVERALL (mean over {len(PROFILES)} profiles x {len(TEST_SEEDS)} test seeds, "
+          f"{EVAL_TICKS} ticks; RL: mean ± std over {len(TRAIN_SEEDS)} training seeds)")
+    print("=" * 100)
+    cols = [("avg_delay", 1), ("p95_delay", 1), ("max_delay", 1), ("ambulance_delay", 1),
+            ("avg_queue", 1), ("throughput", 3)]
+    print(f"{'Controller':<13}" + "".join(f"{k:>16}" for k, _ in cols) + f"{'vs Fixed':>10}")
+    for name in CONTROLLERS:
+        mean, std, _ = controller_summary(rows, name)
+        line = f"{name:<13}" + "".join(f"{fmt(mean[k], std[k], d):>16}" for k, d in cols)
+        print(line + f"{improvement_vs_fixed(rows, name):>9.1f}%")
 
-    print("\n" + "=" * 88)
-    print("MODEL PERFORMANCE METRICS  (averaged over %d profiles x %d seeds)" %
-          (len(PROFILES), len(SEEDS)))
-    print("=" * 88)
-    header = (f"{'Controller':<14}" + f"{'Avg Wait':>10}" + f"{'Avg Queue':>10}"
-              + f"{'MaxLaneQ':>10}" + f"{'Throughput':>12}" + f"{'Congest':>9}")
-    print(header)
-    print("-" * 88)
-    for name in names:
-        m = means[name]
-        print(f"{name:<14}" + f"{m['avg_wait']:>10.1f}" + f"{m['avg_queue']:>10.1f}"
-              + f"{m['max_queue']:>10.0f}" + f"{m['throughput']:>12.3f}"
-              + f"{m['congestion']:>9.3f}")
-    print("-" * 88)
-    print("Best (early guide, not a substitute for reading the table):")
-    best_wait = min(means, key=lambda n: means[n]["avg_wait"])
-    best_q = min(means, key=lambda n: means[n]["avg_queue"])
-    best_maxq = min(means, key=lambda n: means[n]["max_queue"])
-    best_tp = max(means, key=lambda n: means[n]["throughput"])
-    best_cong = min(means, key=lambda n: means[n]["congestion"])
-    print(f"  lowest avg wait : {best_wait}")
-    print(f"  lowest avg queue: {best_q}")
-    print(f"  lowest max lane queue: {best_maxq}")
-    print(f"  highest throughput: {best_tp}")
-    print(f"  lowest congestion: {best_cong}")
-    return means
+    print("\nAVG DELAY PER VEHICLE (s) BY PROFILE")
+    print(f"{'Controller':<13}" + "".join(f"{p:>16}" for p in PROFILES))
+    for name in CONTROLLERS:
+        prof = per_profile(rows, name)
+        print(f"{name:<13}" + "".join(f"{prof[p]:>16.1f}" for p in PROFILES))
+
+    mean, lo, hi = paired_bootstrap_ci(paired_delay_diffs(rows, "DQN", "Density"))
+    print(f"\nDQN - Density avg delay: {mean:+.2f} s  (95% CI {lo:+.2f} .. {hi:+.2f})")
 
 
-def make_graphs(all_results, training_curves, out_dir=IMG_DIR):
-    """
-    Generate the 4 critical graphs with matplotlib (graceful ASCII fallback).
-    """
-    os.makedirs(out_dir, exist_ok=True)
-    names = list(all_results.keys())
-    means = {n: mean_across_profiles_seeds(all_results[n]) for n in names}
-    metrics = ["avg_wait", "avg_queue", "max_queue", "throughput", "congestion"]
-
+def make_graphs(rows, training, out_dir):
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        print("matplotlib not available - printing ASCII summary instead.")
-        for name in names:
-            m = means[name]
-            print(f"{name:<12} wait={m['avg_wait']:.0f} q={m['avg_queue']:.0f} "
-                  f"maxq={m['max_queue']:.0f} tp={m['throughput']:.2f} "
-                  f"cong={m['congestion']:.2f}")
+        print("matplotlib not available - skipping graphs.")
         return
+    os.makedirs(out_dir, exist_ok=True)
+    x = np.arange(len(CONTROLLERS))
+    summaries = {n: controller_summary(rows, n) for n in CONTROLLERS}
 
-    x = np.arange(len(names))
-    width = 0.55
+    def bar_chart(key, ylabel, title, filename, color, digits):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        means = [summaries[n][0][key] for n in CONTROLLERS]
+        stds = [summaries[n][1][key] for n in CONTROLLERS]
+        ax.bar(x, means, 0.55, yerr=stds, capsize=6, color=color)
+        for xi, m in zip(x, means):
+            ax.text(xi, m, f"{m:.{digits}f}", ha="center", va="bottom", fontsize=9)
+        ax.set_xticks(x)
+        ax.set_xticklabels(CONTROLLERS)
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.grid(True, axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, filename))
+        plt.close(fig)
 
-    # ---- Graph 1 : Average waiting time (lower better) ----
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(x, [means[n]["avg_wait"] for n in names], width, color="#4C72B0")
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=15)
-    ax.set_ylabel("Average waiting time (s)")
-    ax.set_title("Controller Comparison - Average Waiting Time (lower is better)")
-    for xi, n in zip(x, names):
-        ax.text(xi, means[n]["avg_wait"], f"{means[n]['avg_wait']:.0f}",
-                ha="center", va="bottom", fontsize=8)
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "G1_avg_wait_comparison.png"))
-    plt.close(fig)
+    bar_chart("avg_delay", "Average delay per vehicle (s)",
+              "Average delay per vehicle (lower is better; RL error bars = training-seed std)",
+              "G1_avg_delay_comparison.png", "#4C72B0", 1)
+    bar_chart("throughput", "Throughput (veh/s)",
+              "Throughput (higher is better; RL error bars = training-seed std)",
+              "G2_throughput_comparison.png", "#55A868", 3)
 
-    # ---- Graph 2 : Throughput (higher better) ----
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(x, [means[n]["throughput"] for n in names], width, color="#55A868")
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=15)
-    ax.set_ylabel("Throughput (veh/s)")
-    ax.set_title("Controller Comparison - Throughput (higher is better)")
-    for xi, n in zip(x, names):
-        ax.text(xi, means[n]["throughput"], f"{means[n]['throughput']:.2f}",
-                ha="center", va="bottom", fontsize=8)
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "G2_throughput_comparison.png"))
-    plt.close(fig)
-
-    # ---- Graph 3 : Average queue (lower better) ----
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(x, [means[n]["avg_queue"] for n in names], width, color="#C44E52")
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=15)
-    ax.set_ylabel("Average queue length (veh)")
-    ax.set_title("Controller Comparison - Average Queue (lower is better)")
-    for xi, n in zip(x, names):
-        ax.text(xi, means[n]["avg_queue"], f"{means[n]['avg_queue']:.0f}",
-                ha="center", va="bottom", fontsize=8)
-    ax.grid(True, axis="y", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "G3_avg_queue_comparison.png"))
-    plt.close(fig)
-
-    # ---- Graph 4 : RL learning curves (greedy validation wait) ----
-    # Raw episode rewards mix five profiles of very different difficulty,
-    # so the honest learning signal is the greedy policy's score on a fixed
-    # held-out validation set, with the rule-based controllers as reference.
-    fig, ax = plt.subplots(figsize=(8, 5))
-    curves = (training_curves or {}).get("validation", {})
-    for label, points in curves.items():
-        eps, waits = zip(*points)
-        ax.plot(eps, waits, marker="o", markersize=3, linewidth=1.5, label=label)
-    styles = {"Fixed Timer": ":", "Density": "--"}
-    for label, wait in (training_curves or {}).get("reference", {}).items():
-        ax.axhline(wait, color="gray", linestyle=styles.get(label, "-."),
-                   linewidth=1.2, label=f"{label} (reference)")
-    ax.set_yscale("log")
-    ax.set_xlabel("Training episode")
-    ax.set_ylabel("Validation avg waiting time (log scale)")
-    ax.set_title("RL Learning Curves - greedy policy on held-out seeds (lower is better)")
+    # G3: per-profile grouped bars.
+    fig, ax = plt.subplots(figsize=(10, 5))
+    width = 0.8 / len(CONTROLLERS)
+    px = np.arange(len(PROFILES))
+    for i, name in enumerate(CONTROLLERS):
+        prof = per_profile(rows, name)
+        ax.bar(px + (i - (len(CONTROLLERS) - 1) / 2) * width,
+               [prof[p] for p in PROFILES], width, label=name)
+    ax.set_xticks(px)
+    ax.set_xticklabels(PROFILES)
+    ax.set_ylabel("Average delay per vehicle (s)")
+    ax.set_title("Average delay per vehicle by traffic profile (lower is better)")
     ax.legend()
-    ax.grid(True, which="both", alpha=0.3)
+    ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "G4_rl_training_curves.png"))
+    fig.savefig(os.path.join(out_dir, "G3_delay_by_profile.png"))
     plt.close(fig)
 
-    print(f"Saved graphs to {out_dir}/G1..G4_*.png")
+    # G4: learning curves (one line per training seed) + references.
+    if training:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        colors = {"Q-Learning": "#1f77b4", "DQN": "#ff7f0e"}
+        for name in RL_AGENTS:
+            for i, train_seed in enumerate(TRAIN_SEEDS):
+                eps, vals = zip(*training["validation"][(name, train_seed)])
+                ax.plot(eps, vals, color=colors[name], alpha=0.75, linewidth=1.3,
+                        label=name if i == 0 else None)
+        for name, style in (("Fixed Timer", ":"), ("Density", "--")):
+            ax.axhline(training["reference"][name], color="gray", linestyle=style,
+                       linewidth=1.2, label=f"{name} (reference)")
+        ax.set_yscale("log")
+        ax.set_xlabel("Training episode")
+        ax.set_ylabel("Validation avg delay per vehicle (s, log scale)")
+        ax.set_title(f"RL learning curves: greedy policy on held-out seeds "
+                     f"({len(TRAIN_SEEDS)} training seeds each)")
+        ax.legend()
+        ax.grid(True, which="both", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_dir, "G4_rl_training_curves.png"))
+        plt.close(fig)
+    print(f"Saved graphs to {out_dir}/")
 
 
-def write_dataset_doc(all_results, training_curves, path):
-    """Write the model card / dataset documentation markdown."""
-    names = list(all_results.keys())
-    means = {n: mean_across_profiles_seeds(all_results[n]) for n in names}
-
-    def fmt(v):
-        return f"{v:.3f}"
-
-    lines = []
-    lines.append("# Dataset & Model Documentation")
-    lines.append("")
-    lines.append("## Dataset Details")
-    lines.append("")
-    lines.append("**Source**: Synthetic traffic data generated using the ")
-    lines.append("project's deterministic traffic simulator (no external dataset).")
-    lines.append("")
-    lines.append("**Traffic scenarios**: " + ", ".join(PROFILES) + ".")
-    lines.append("")
-    lines.append("**Simulation**: each run is a fixed window of ticks; multiple seeds ")
-    lines.append(f"({SEEDS}) are used per scenario for a stable average.")
-    lines.append("")
-    lines.append("### State features (23-dimensional observation)")
-    lines.append("")
-    lines.append("- 4  queue lengths (per approach)")
-    lines.append("- 4  percentile ranks (per approach)")
-    lines.append("- 4  longest current wait (per approach; starvation signal)")
-    lines.append("- 10 active-phase one-hot values")
-    lines.append("- 1  elapsed green time of the active phase")
-    lines.append("- **23 total**, computed by one function in both training and inference")
-    lines.append("")
-    lines.append("### Action space (10 discrete actions, extend-or-switch)")
-    lines.append("")
-    lines.append("- PHASE_1 ... PHASE_10, chosen each time the active green runs out.")
-    lines.append(f"- Choosing the active phase extends it by {rl_config.GREEN_EXTENSION:.0f} s; "
-                 f"choosing another starts it (after yellow) with {rl_config.MIN_GREEN:.0f} s green.")
-    lines.append(f"- Green is capped at {rl_config.MAX_GREEN:.0f} s. These are the same bounds "
-                 "the Density controller uses.")
-    lines.append("")
-    lines.append("### Reward")
-    lines.append("")
-    lines.append("```")
-    lines.append(f"reward = -(sum over the step's ticks of total_queue * tick_seconds) / {rl_config.REWARD_SCALE:.0f}")
-    lines.append("```")
-    lines.append("")
-    lines.append("Queueing delay in vehicle-seconds. Discount is per simulated second "
-                 f"(gamma = {rl_config.GAMMA_PER_SECOND} ** step_seconds); episode time "
-                 "limits are treated as truncation, not termination.")
-    lines.append("")
-    lines.append("## Models")
-    lines.append("")
-    lines.append("### 1. Tabular Q-Learning")
-    lines.append("")
-    lines.append("- State discretization: queue LOW/MED/HIGH per approach (3^4 = 81) "
-                 "x active phase (10) x elapsed-green level (3) => **2430 states**.")
-    lines.append("- Q-table shape: (2430, 10).")
-    lines.append("- Updates: Q-learning with linearly decaying epsilon-greedy exploration.")
-    lines.append("")
-    lines.append("### 2. DQN (Deep Q-Network)")
-    lines.append("")
-    lines.append("```")
-    lines.append("23 input features")
-    lines.append("       |")
-    lines.append("       64   (ReLU)")
-    lines.append("       |")
-    lines.append("       64   (ReLU)")
-    lines.append("       |")
-    lines.append("       10 Q-values")
-    lines.append("```")
-    lines.append("")
-    lines.append("- Pure-numpy MLP and Adam optimizer (no deep-learning framework).")
-    lines.append("- Experience replay, target network, Double-DQN targets, Huber loss, "
-                 "gradient-norm clipping.")
-    lines.append(f"- Training: {rl_config.DQN_EPISODES} episodes of {rl_config.EPISODE_LENGTH} "
-                 "ticks; best checkpoint on held-out validation seeds is kept.")
-    lines.append("")
-    lines.append("## Model Performance Metrics")
-    lines.append("")
-    lines.append("Averaged over all profiles (" + ", ".join(PROFILES) + ") and seeds ("
-                 + ", ".join(str(s) for s in SEEDS) + ").")
-    lines.append("")
-    lines.append("| Controller | Avg Wait | Avg Queue | Max Lane Queue | Throughput | Congestion |")
-    lines.append("|------------|----------|-----------|-----------|------------|------------|")
-    for name in names:
-        m = means[name]
-        lines.append(f"| {name} | {fmt(m['avg_wait'])} | {fmt(m['avg_queue'])} | "
-                     f"{fmt(m['max_queue'])} | {fmt(m['throughput'])} | "
-                     f"{fmt(m['congestion'])} |")
-    lines.append("")
-    lines.append("_Wait/Queue/Congestion: lower is better. Throughput: higher is better._")
-    lines.append("_Avg Queue is the whole-intersection total (all 16 lanes); "
-                 "Max Lane Queue is the longest single lane seen during the run._")
-    lines.append("_RL rows come from a single training run (seed "
-                 f"{rl_config.SEED} / {rl_config.SEED + 1}); variance across training "
-                 "seeds is not yet included in this table._")
-    lines.append("")
-    lines.append("## Training curves")
-    lines.append("")
-    validation = training_curves.get("validation", {})
-    if validation:
-        lines.append(f"Greedy policy scored every {rl_config.VALIDATION_EVERY} episodes on "
-                     f"held-out seeds {list(rl_config.VALIDATION_SEEDS)} "
-                     f"({rl_config.VALIDATION_TICKS} ticks per profile), "
-                     "average waiting time:")
-        lines.append("")
-        for label, points in validation.items():
-            start, end = points[0][1], points[-1][1]
-            best_ep, best = min(points, key=lambda p: p[1])
-            lines.append(f"- {label}: {start:.0f} untrained -> {end:.0f} after "
-                         f"{points[-1][0]} episodes; best {best:.0f} at episode "
-                         f"{best_ep} (this checkpoint is the one evaluated).")
-        for label, wait in training_curves.get("reference", {}).items():
-            lines.append(f"- {label} on the same validation set: {wait:.0f}.")
+def write_model_card(rows, training, path):
+    L = []
+    add = L.append
+    add("# Dataset & Model Documentation")
+    add("")
+    add("## Dataset Details")
+    add("")
+    add("**Source**: Synthetic traffic generated by the project's deterministic, seeded "
+        "traffic simulator (no external dataset).")
+    add("")
+    add("**Traffic scenarios**: " + ", ".join(PROFILES) + ".")
+    add("")
+    add("**Seeds**: training episodes use seeds from "
+        f"{TRAIN_SEEDS} upward, validation uses {list(rl_config.VALIDATION_SEEDS)}, "
+        f"testing uses {TEST_SEEDS}. The three sets never overlap.")
+    add("")
+    add("**Known scenario property**: RUSH_HOUR demand (~3.3 veh/s) exceeds the "
+        "intersection's service capacity (~2.7 veh/s), so queues grow under every "
+        "controller, and ~1% of vehicles are ambulances (about one every 30 s), so most "
+        "of that profile is spent in rule-based emergency preemption. It is kept as an "
+        "oversaturated stress test; per-profile results below keep it from dominating.")
+    add("")
+    add("### State features (23-dimensional observation)")
+    add("")
+    add("- 4  queue lengths (per approach)")
+    add("- 4  percentile ranks (per approach)")
+    add("- 4  longest current wait (per approach; starvation signal)")
+    add("- 10 active-phase one-hot values")
+    add("- 1  elapsed green time of the active phase")
+    add("- **23 total**, computed by one function in both training and inference")
+    add("")
+    add("### Action space (10 discrete actions, extend-or-switch)")
+    add("")
+    add("- PHASE_1 ... PHASE_10, chosen each time the active green runs out.")
+    add(f"- Choosing the active phase extends it by {rl_config.GREEN_EXTENSION:.0f} s; "
+        f"choosing another starts it (after yellow) with {rl_config.MIN_GREEN:.0f} s green.")
+    add(f"- Green is capped at {rl_config.MAX_GREEN:.0f} s. These are the same bounds "
+        "the Density controller uses.")
+    add("")
+    add("### Reward")
+    add("")
+    add("```")
+    add(f"reward = -(sum over the step's ticks of total_queue * tick_seconds) / "
+        f"{rl_config.REWARD_SCALE:.0f}")
+    add("```")
+    add("")
+    add("Queueing delay in vehicle-seconds. Discount is per simulated second "
+        f"(gamma = {rl_config.GAMMA_PER_SECOND} ** step_seconds); episode time limits are "
+        "treated as truncation, not termination.")
+    add("")
+    add("## Models")
+    add("")
+    add("### 1. Tabular Q-Learning")
+    add("")
+    add("- State: queue LOW/MED/HIGH per approach (3^4 = 81) x active phase (10) x "
+        "elapsed-green level (3) => **2430 states**; Q-table (2430, 10).")
+    add("- Q-learning with linearly decaying epsilon-greedy exploration.")
+    add("")
+    add("### 2. DQN (Deep Q-Network)")
+    add("")
+    add("```")
+    add("23 inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values")
+    add("```")
+    add("")
+    add("- Pure-numpy MLP and Adam optimizer (no deep-learning framework).")
+    add("- Experience replay, target network, Double-DQN targets, Huber loss, "
+        "gradient-norm clipping.")
+    add("")
+    add(f"Both: {rl_config.DQN_EPISODES} episodes of {rl_config.EPISODE_LENGTH} ticks, "
+        f"trained independently from {len(TRAIN_SEEDS)} seeds {TRAIN_SEEDS}; for each run "
+        "the checkpoint with the best validation delay is kept.")
+    add("")
+    add("## Evaluation Protocol")
+    add("")
+    add(f"- {len(PROFILES)} profiles x {len(TEST_SEEDS)} test seeds x {EVAL_TICKS} ticks "
+        f"({EVAL_TICKS * 0.5 / 60:.0f} simulated minutes) per controller; RL agents are "
+        f"evaluated once per training seed ({len(PROFILES) * len(TEST_SEEDS) * len(TRAIN_SEEDS)} "
+        "runs each).")
+    add("- **Delay per vehicle** = seconds a vehicle spent queued. Vehicles still queued at "
+        "the end count with the delay accrued so far, so leaving vehicles unserved is "
+        "never rewarded.")
+    add("- **Queued veh-s** is the legacy \"average waiting time\": total waiting "
+        "time of everyone queued, averaged over ticks (vehicle-seconds, not seconds per vehicle).")
+    add("")
+    add("## Model Performance Metrics")
+    add("")
+    add("Mean over all profiles and test seeds. RL: mean ± std across training seeds.")
+    add("")
+    header = ["Controller"] + [label for _, label, _ in METRICS] + ["Delay cut vs Fixed"]
+    add("| " + " | ".join(header) + " |")
+    add("|" + "---|" * len(header))
+    for name in CONTROLLERS:
+        mean, std, _ = controller_summary(rows, name)
+        cells = [fmt(mean[k], std[k], 3 if k == "throughput" else 1) for k in METRIC_KEYS]
+        add(f"| {name} | " + " | ".join(cells) + f" | {improvement_vs_fixed(rows, name):+.1f}% |")
+    add("")
+    add("_All metrics lower is better except Throughput. \"Delay cut vs Fixed\" is the "
+        "mean, over profiles, of the % reduction in avg delay vs Fixed Timer "
+        "(positive = better), so every profile counts equally._")
+    add("")
+    add("### Average delay per vehicle (s) by profile")
+    add("")
+    add("| Controller | " + " | ".join(PROFILES) + " |")
+    add("|" + "---|" * (len(PROFILES) + 1))
+    for name in CONTROLLERS:
+        prof = per_profile(rows, name)
+        add(f"| {name} | " + " | ".join(f"{prof[p]:.1f}" for p in PROFILES) + " |")
+    add("")
+    mean, lo, hi = paired_bootstrap_ci(paired_delay_diffs(rows, "DQN", "Density"))
+    add("### DQN vs Density")
+    add("")
+    add(f"Paired difference in avg delay (DQN − Density) over the "
+        f"{len(PROFILES) * len(TEST_SEEDS)} (profile, test seed) pairs: "
+        f"**{mean:+.2f} s** (95% bootstrap CI {lo:+.2f} to {hi:+.2f} s). "
+        + ("The interval excludes 0." if lo > 0 or hi < 0 else
+           "The interval includes 0: no significant difference."))
+    add("")
+    add("## Training curves")
+    add("")
+    if training:
+        add(f"Greedy policy scored every {rl_config.VALIDATION_EVERY} episodes on validation "
+            f"seeds {list(rl_config.VALIDATION_SEEDS)} ({rl_config.VALIDATION_TICKS} ticks per "
+            "profile), avg delay per vehicle (s); best checkpoint kept:")
+        add("")
+        for name in RL_AGENTS:
+            for s in TRAIN_SEEDS:
+                pts = training["validation"][(name, s)]
+                best_ep, best = min(pts, key=lambda p: p[1])
+                add(f"- {name} (seed {s}): {pts[0][1]:.1f} untrained -> best {best:.1f} "
+                    f"at episode {best_ep}.")
+        for name in RULE_BASED:
+            add(f"- {name} on the same validation set: {training['reference'][name]:.1f}.")
     else:
-        lines.append("- Agents loaded from models/ (no training this run).")
-    lines.append("")
+        add("- Agents loaded from models/ (no training this run).")
+    add("")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L))
+    print(f"Wrote model card to {path}")
 
-    with open(path, "w") as f:
-        f.write("\n".join(lines))
-    print(f"Wrote dataset/model documentation to {path}")
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
     t0 = time.time()
+    workers = min(os.cpu_count() or 1, len(RL_AGENTS) * len(TRAIN_SEEDS) + 2)
 
-    print("=" * 88)
-    print("PHASE 4 - CONTROLLED RL EXPERIMENTS")
-    print(f"profiles={PROFILES} seeds={SEEDS} eval_ticks={EVAL_TICKS}")
-    print(f"RL training budget: {rl_config.TABULAR_EPISODES} (tabular) / "
-          f"{rl_config.DQN_EPISODES} (DQN) episodes of {rl_config.EPISODE_LENGTH} ticks")
-    print("=" * 88)
+    print("=" * 100)
+    print("CONTROLLED RL EXPERIMENTS")
+    print(f"profiles={PROFILES} test_seeds={TEST_SEEDS} eval_ticks={EVAL_TICKS} "
+          f"train_seeds={TRAIN_SEEDS}")
+    print("=" * 100)
 
-    # ---- Train (or load) the RL agents ----
-    if "--use-saved" in sys.argv:
-        print("\n[1/3] Loading RL agents from models/ ...")
-        tabular_agent, dqn_agent = load_saved_agents()
-        training_curves = {}
-    else:
-        print("\n[1/3] Training RL agents...")
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        print(" tabular Q-learning:")
-        tabular_agent, tabular_hist = train_and_wrap_tabular(rl_config.SEED)
-        print(" DQN:")
-        dqn_agent, dqn_hist = train_and_wrap_dqn(rl_config.SEED + 1)
-        training_curves = {
-            "validation": {
-                "Q-Learning": tabular_hist["validation"],
-                "DQN": dqn_hist["validation"],
-            },
-            "reference": {
-                "Fixed Timer": score_policy(fresh_fixed_timer),
-                "Density": score_policy(fresh_density),
-            },
-        }
+    training = None
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        if "--use-saved" not in sys.argv:
+            print(f"\n[1/3] Training {len(RL_AGENTS)} agents x {len(TRAIN_SEEDS)} seeds "
+                  f"in parallel ({workers} workers)...")
+            jobs = [(n, s) for n in RL_AGENTS for s in TRAIN_SEEDS]
+            training = {"validation": {}, "reference": {}}
+            refs = pool.map(_reference_worker, RULE_BASED)
+            for name, seed, history in pool.map(_train_worker, jobs):
+                training["validation"][(name, seed)] = history["validation"]
+                print(f"  {name} seed {seed}: best checkpoint at episode "
+                      f"{history['best_episode']}")
+            training["reference"] = dict(refs)
+            save_training(training)
+        else:
+            print("\n[1/3] Using saved agents from models/ ...")
+            training = load_training()
 
-    # ---- Evaluate all 4 controllers ----
-    # Note: RL strategies self-drive in the Simulation (argmax over the
-    # learned Q / policy net) - no training happens during evaluation.
-    print("\n[2/3] Evaluating controllers...")
-    controllers = {
-        "Fixed Timer": fresh_fixed_timer,
-        "Density": fresh_density,
-        # Fresh RLStrategy per run: it carries per-run bookkeeping
-        # (starvation counters, phase start time) that must not leak.
-        "Q-Learning": lambda: RLStrategy(agent=tabular_agent),
-        "DQN": lambda: RLStrategy(agent=dqn_agent),
-    }
-    all_results = collect_all(controllers, EVAL_TICKS)
+        print("\n[2/3] Evaluating controllers...")
+        jobs = [(n, None) for n in RULE_BASED] + [(n, s) for n in RL_AGENTS for s in TRAIN_SEEDS]
+        rows = [row for result in pool.map(_eval_worker, jobs) for row in result]
+    print(f"  {len(rows)} evaluation runs")
 
-    # ---- Table + graphs ----
-    print("\n[3/3] Building table + graphs + docs...")
-    means = print_table(all_results)
-    write_csv(all_results, os.path.join(OUT_DIR, "results_table.csv"))
-    make_graphs(all_results, training_curves, IMG_DIR)
-    write_dataset_doc(all_results, training_curves,
-                      os.path.join(OUT_DIR, "model_cards.md"))
-
-    print("\n" + "=" * 88)
-    print(f"EXPERIMENTS COMPLETE in {time.time() - t0:.1f}s")
-    print(f"  CSV table  -> {os.path.join(OUT_DIR, 'results_table.csv')}")
-    print(f"  model docs -> {os.path.join(OUT_DIR, 'model_cards.md')}")
-    print(f"  graphs     -> {IMG_DIR}/G1..G4_*.png")
-    print("=" * 88)
+    print("\n[3/3] Tables, graphs and documentation...")
+    print_tables(rows)
+    write_csv(rows, os.path.join(OUT_DIR, "results_table.csv"))
+    make_graphs(rows, training, IMG_DIR)
+    write_model_card(rows, training, os.path.join(OUT_DIR, "model_cards.md"))
+    print(f"\nEXPERIMENTS COMPLETE in {time.time() - t0:.1f}s")
 
 
 if __name__ == "__main__":
     main()
-

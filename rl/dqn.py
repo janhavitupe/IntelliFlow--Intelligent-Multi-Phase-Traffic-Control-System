@@ -5,9 +5,9 @@ A hand-rolled, pure-numpy Deep Q-Network (Stage 2).
 
 The function approximator is a small multilayer perceptron with ReLU hidden
 units and a linear output head over the 10 phase-actions. The MLP and its
-backprop are validated on a tiny XOR toy problem (see _validate_mlp.py)
-INDEPENDENT of any RL machinery, so that a DQN non-convergence can never be
-attributed to a backprop bug.
+backprop are validated by a finite-difference gradient check
+(tests/test_agents.py) INDEPENDENT of any RL machinery, so that a DQN
+non-convergence can never be attributed to a backprop bug.
 
 Why numpy:
     A 10-action / ~23-dim state problem is small enough that a hand-rolled
@@ -140,6 +140,25 @@ class MLP:
         return f"MLP({self.n_input}->{self.hidden}->{self.n_output})"
 
 
+def value_transform(x, eps):
+    """
+    Invertible value rescaling h(x) = sign(x)(sqrt(|x| + 1) - 1) + eps*x
+    (Pohlen et al. 2018, "Observe and Look Further"; used in R2D2).
+
+    Compresses large magnitudes so one network can represent values that
+    differ by orders of magnitude across traffic levels. Monotonic, so the
+    greedy action (and hence the optimal policy) is unchanged.
+    """
+    return np.sign(x) * (np.sqrt(np.abs(x) + 1.0) - 1.0) + eps * x
+
+
+def value_transform_inverse(x, eps):
+    """Exact inverse of value_transform."""
+    return np.sign(x) * (
+        ((np.sqrt(1.0 + 4.0 * eps * (np.abs(x) + 1.0 + eps)) - 1.0) / (2.0 * eps)) ** 2 - 1.0
+    )
+
+
 class Adam:
     """
     Adam optimizer for an MLP's accumulated gradients.
@@ -237,6 +256,7 @@ class DQNAgent:
         batch_size=None,
         target_update=None,
         seed=None,
+        value_rescaling=None,
     ):
         obs_dim = obs_dim if obs_dim is not None else rl_config.OBS_DIM
         n_actions = n_actions if n_actions is not None else rl_config.NUM_PHASES
@@ -261,6 +281,12 @@ class DQNAgent:
         self.buffer = ReplayBuffer(replay_size, seed=np_seed)
         self.optimizer = Adam(self.policy_net, lr=alpha)
         self.huber_delta = rl_config.DQN_HUBER_DELTA
+        # When on, the network outputs h(Q) instead of Q (see value_transform).
+        self.value_rescaling = (
+            value_rescaling if value_rescaling is not None
+            else rl_config.DQN_VALUE_RESCALING
+        )
+        self.rescale_eps = rl_config.DQN_VALUE_RESCALING_EPS
         self.grad_clip = rl_config.DQN_GRAD_CLIP
 
         self.obs_dim = obs_dim
@@ -328,7 +354,12 @@ class DQNAgent:
         rows = np.arange(self.batch_size)
         best_next = self.policy_net.predict(nexts).argmax(axis=1)   # (B,)
         q_next = self.target_net.predict(nexts)[rows, best_next]    # (B,)
+        if self.value_rescaling:
+            # Network values live in h-space: map back, bootstrap, map again.
+            q_next = value_transform_inverse(q_next, self.rescale_eps)
         targets = rewards + discounts * q_next * (1.0 - dones)
+        if self.value_rescaling:
+            targets = value_transform(targets, self.rescale_eps)
 
         # Forward on the policy net (must come after the predict above,
         # which overwrites the activation cache used by backward).

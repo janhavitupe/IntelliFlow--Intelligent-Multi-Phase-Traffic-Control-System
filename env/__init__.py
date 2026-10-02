@@ -6,14 +6,14 @@ standard reset()/step() interface so any reinforcement-learning agent can
 drive the simulator without touching the scheduler/controller code.
 
 The environment:
-    - observation : reuses the Density strategy's features (queue length,
-                    percentile rank, starvation) plus active-phase one-hot
-                    and elapsed time -> a 23-dim vector.
-    - action      : choose one of the 10 normal phases at each decision
-                    point (not every tick).
-    - reward      : r = -sum(queue_lengths) over the step (crude congestion
-                    proxy, sufficient to get a learning signal).
-    - done        : True once the episode's simulation-time budget is used.
+    - observation : 23-dim vector (queue, rank and longest wait per approach,
+                    active-phase one-hot, elapsed green), built by
+                    RLStrategy.observe() for training and inference alike.
+    - action      : one of the 10 phases each time the active green runs
+                    out (same phase = extend 5 s, other phase = switch).
+    - reward      : -(queueing delay in vehicle-seconds over the step) / 1000.
+    - done        : episode time budget used up (a truncation:
+                    info["truncated"] is True and learners still bootstrap).
 
 Emergency preemption remains fully rule-based. The scheduler handles it
 internally without consulting the strategy, so the agent never sees or acts

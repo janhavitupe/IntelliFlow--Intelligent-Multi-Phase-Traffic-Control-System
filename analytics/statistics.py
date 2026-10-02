@@ -69,6 +69,11 @@ class Statistics:
         # Vehicles served per vehicle type (VehicleType.name -> int).
         self.served_by_type = {}
 
+        # Per-vehicle delay (seconds queued before departing), recorded at
+        # departure. Basis for the delay-per-vehicle KPIs below.
+        self._served_delays = []
+        self._served_ambulance_delays = []
+
         # Queue growth / reduction rates (vehicles per tick, moving window).
         self._queue_history = []
         self._growth_sum = 0.0
@@ -158,6 +163,9 @@ class Statistics:
             self.served_by_movement[mid] = self.served_by_movement.get(mid, 0) + 1
             vkey = vehicle.vehicle_type.name
             self.served_by_type[vkey] = self.served_by_type.get(vkey, 0) + 1
+            self._served_delays.append(vehicle.waiting_time)
+            if vehicle.vehicle_type == VehicleType.AMBULANCE:
+                self._served_ambulance_delays.append(vehicle.waiting_time)
 
     def record_green_time(self, phase_type, delta: float):
         """Accumulate green time for a phase."""
@@ -244,6 +252,47 @@ class Statistics:
             return 0.0
         return self._wait_sum / self._wait_sample_count
 
+    # -------- Per-vehicle delay KPIs (seconds) --------
+    #
+    # average_waiting_time above is vehicle-seconds (summed over everyone
+    # queued, averaged over ticks). These are per VEHICLE. Vehicles still
+    # queued at the end are included with the wait accrued so far (a lower
+    # bound on their final delay), so a controller cannot look good by
+    # simply never serving someone.
+
+    def _queued_vehicles(self):
+        for lane in self.intersection.all_lanes():
+            yield from lane.queue
+
+    def vehicle_delays(self) -> list:
+        """Delay of every vehicle seen: served (final) + still queued (so far)."""
+        return self._served_delays + [v.waiting_time for v in self._queued_vehicles()]
+
+    @property
+    def average_delay(self) -> float:
+        delays = self.vehicle_delays()
+        return sum(delays) / len(delays) if delays else 0.0
+
+    @property
+    def p95_delay(self) -> float:
+        delays = sorted(self.vehicle_delays())
+        if not delays:
+            return 0.0
+        return delays[min(len(delays) - 1, int(0.95 * len(delays)))]
+
+    @property
+    def max_delay(self) -> float:
+        return max(self.vehicle_delays(), default=0.0)
+
+    @property
+    def ambulance_average_delay(self):
+        """Average ambulance delay (served + still queued), or None if none."""
+        delays = self._served_ambulance_delays + [
+            v.waiting_time for v in self._queued_vehicles()
+            if v.vehicle_type == VehicleType.AMBULANCE
+        ]
+        return sum(delays) / len(delays) if delays else None
+
     @property
     def throughput(self) -> float:
         """Vehicles served per simulation second."""
@@ -281,6 +330,10 @@ class Statistics:
             "vehicles_spawned": self.total_vehicles_spawned,
             "vehicles_served": self.total_vehicles_served,
             "average_waiting_time": round(self.average_waiting_time, 2),
+            "average_delay": round(self.average_delay, 2),
+            "p95_delay": round(self.p95_delay, 2),
+            "max_delay": round(self.max_delay, 2),
+            "ambulance_average_delay": self.ambulance_average_delay,
             "average_queue_length": round(self.average_queue_length, 2),
             "throughput": round(self.throughput, 2),
             "congestion_ratio": round(self.congestion_ratio, 3),

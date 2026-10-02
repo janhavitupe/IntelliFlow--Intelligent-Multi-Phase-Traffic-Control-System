@@ -20,7 +20,7 @@ Both share one loop (_train), so they see identical episodes:
       the last transition still bootstraps.
     - Every VALIDATION_EVERY episodes the GREEDY policy is scored on
       held-out seeds through the real Simulation loop. That validation
-      curve (avg wait vs episode) is the honest learning curve: raw episode
+      curve (delay vs episode) is the honest learning curve: raw episode
       rewards mix five profiles of very different difficulty.
     - The best-scoring checkpoint is restored at the end (early-stopping
       style model selection). Validation seeds are disjoint from both the
@@ -50,7 +50,7 @@ def validate(agent, profiles=None, seeds=None, ticks=None):
     evaluation does.
 
     Returns:
-        float: average waiting time across profiles x seeds (lower is better).
+        float: average delay per vehicle (s) across profiles x seeds.
     """
     from strategies.rl_strategy import RLStrategy
 
@@ -59,7 +59,7 @@ def validate(agent, profiles=None, seeds=None, ticks=None):
 
 def score_policy(strategy_factory, profiles=None, seeds=None, ticks=None):
     """
-    Average waiting time of any strategy on the validation set.
+    Average delay per vehicle (s) of any strategy on the validation set.
 
     Used for RL checkpoints and for the Fixed/Density reference lines, so
     all of them are scored identically.
@@ -79,7 +79,7 @@ def score_policy(strategy_factory, profiles=None, seeds=None, ticks=None):
             )
             for _ in range(ticks):
                 sim.step()
-            waits.append(sim.analytics.average_waiting_time)
+            waits.append(sim.analytics.average_delay)
     return sum(waits) / len(waits)
 
 
@@ -91,7 +91,7 @@ def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verb
         dict with
             "episode_rewards": list[float], one per episode
             "episode_profiles": list[str], profile of each episode
-            "validation": list[(episode, avg_wait)], greedy-policy checkpoints
+            "validation": list[(episode, avg_delay)], greedy-policy checkpoints
             "best_episode": int, checkpoint restored into the agent
     """
     history = {"episode_rewards": [], "episode_profiles": [], "validation": []}
@@ -103,7 +103,7 @@ def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verb
         if wait < best["wait"]:
             best.update(wait=wait, episode=ep, weights=agent.get_weights())
         if verbose:
-            print(f"  [validation] after {ep:>4} episodes: greedy avg wait = {wait:.1f}")
+            print(f"  [validation] after {ep:>4} episodes: greedy avg delay = {wait:.2f} s")
 
     checkpoint(0)
     for ep in range(n_episodes):
@@ -146,7 +146,7 @@ def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verb
     history["best_episode"] = best["episode"]
     if verbose:
         print(f"  restored best checkpoint: episode {best['episode']} "
-              f"(validation avg wait {best['wait']:.1f})")
+              f"(validation avg delay {best['wait']:.2f} s)")
     return history
 
 

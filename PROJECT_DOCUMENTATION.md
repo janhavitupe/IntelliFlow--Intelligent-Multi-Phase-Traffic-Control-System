@@ -1,401 +1,431 @@
-# Smart Traffic Management System — Project Documentation
+# IntelliFlow: Project Documentation
 
-An AI-powered, adaptive traffic-management simulator built in Python with a
-scalable, object-oriented architecture. It models a real 4-way intersection
-with 10 compatible signal phases, a pluggable scheduling strategy design
-pattern, and now a full Reinforcement-Learning (RL) pipeline that learns
-which phase to grant green time under varying traffic conditions.
-
-This document is the authoritative project reference. It covers:
+Technical reference for the simulator, the controllers, the reinforcement-learning
+pipeline and the evaluation methodology. For a quick overview see [README.md](README.md).
+Numeric results live in one place, [results/model_cards.md](results/model_cards.md),
+which `run_experiments.py` regenerates. This document explains how they're produced.
 
 1. Overview & design goals
 2. Project structure
 3. Core domain model
-4. Traffic profiles (dataset)
-5. Scheduling strategies (FixedTimer, Density, RL)
-6. Service & discharge model
-7. Analytics & KPIs
-8. Reinforcement-Learning pipeline (Tabular Q + DQN)
-9. Controlled experiment methodology
-10. Actual model-performance results
-11. How to run
-12. Reproducibility notes
+4. Traffic scenarios (the dataset)
+5. Signal timing, scheduling and emergency preemption
+6. Controllers (strategies)
+7. Vehicle discharge (service model)
+8. Metrics
+9. Reinforcement-learning pipeline
+10. Experiment methodology
+11. Results summary
+12. Testing
+13. How to run
+14. Reproducibility
+15. Known limitations
 
 ---
 
 ## 1. Overview & Design Goals
 
-The system continuously:
+Every simulation tick (0.5 s) the system:
 
-- **Spans** vehicles from a traffic profile (per-movement arrival rates).
-- **Schedules** compatible signal phases via a pluggable `BaseStrategy`.
-- **Discharges** vehicles through a service-time-aware model.
-- **Collects** KPIs (waiting time, queue length, throughput, congestion).
+1. **Spawns** vehicles from a seeded, time-dependent traffic profile.
+2. **Schedules** signal phases. A generic `TrafficScheduler` asks a pluggable strategy
+   which phase to run next; ambulance preemption always comes first.
+3. **Discharges** vehicles on green lanes, at a rate that depends on vehicle type.
+4. **Measures** delay, queues, throughput and more.
 
-The architecture keeps the **scheduler generic**: it asks the active
-strategy *"which phase next?"* and *"how long?"* and never hardcodes
-movement/scheduling logic. This lets us swap in FixedTimer, an adaptive
-Density controller, or a trained RL agent without touching the simulation
-core.
+Design goals:
 
-Everything is **deterministic**: a fixed seed reproduces identical arrivals,
-vehicle types, and emergency generation across runs — essential for fair
-algorithm comparisons.
+- **A generic scheduler** (Strategy pattern): Fixed Timer, Density and RL are
+  interchangeable with no scheduler changes.
+- **Safety outside learning**: ambulance handling is a rule-based state machine that
+  the RL agent never sees or controls.
+- **Determinism**: a seed reproduces identical arrivals, vehicle types and ambulances,
+  which fair controller comparisons depend on.
 
 ---
 
 ## 2. Project Structure
 
 ```
-d:/traffic/
-├── main.py                        # Entry point (creates Simulation, runs it)
-├── simulation.py                  # Simulation orchestrator (main loop)
-├── run_experiments.py             # Controlled RL experiment harness (results)
-├── plot_rewards.py                # Plots the tabular-Q reward curve
-├── requirements.txt
-├── README.md
-├── TODO.md
-├── PROJECT_DOCUMENTATION.md       # This file
+traffic/
+├── main.py                      # live console simulation
+├── simulation.py                # Simulation: wires everything, runs the tick loop
+├── run_experiments.py           # controlled experiment -> results/, images/, models/
+├── plot_rewards.py              # quick tabular-Q training-reward plot
+├── pytest.ini, tests/           # test suite (CI: .github/workflows/tests.yml)
 │
-├── core/                          # Fundamental domain objects
-│   ├── enums.py                   # PhaseType, MovementType, VehicleType, Priority, SignalState
-│   ├── vehicle.py                 # Vehicle (id, type, lane, movement, priority)
-│   ├── queue.py                   # FIFO queue + waiting statistics
-│   ├── signal.py                  # Signal state machine (RED/YELLOW/GREEN)
-│   ├── lane.py                    # Lane (holds a Queue)
-│   ├── movement.py                # Movement — first-class object
-│   ├── approach.py                # Approach (North/South/East/West)
-│   ├── phase.py                   # Phase = collection of compatible Movements
-│   └── intersection.py            # Intersection (4 approaches, spawn, stats)
-│
-├── scheduler/
-│   └── traffic_scheduler.py       # Schedules phases; activates Phase objects
-│
-├── strategies/                    # Strategy Design Pattern
-│   ├── base_strategy.py           # Abstract strategy interface
-│   ├── fixed_timer_strategy.py    # Round-robin baseline controller
-│   ├── density_strategy.py        # Percentile-based adaptive density (Phase 3)
-│   ├── rl_strategy.py             # RL inference wrapper (argmax over Q/policy)
-│   ├── queue_relaxation_strategy.py  # Placeholder (future)
-│   └── emergency_strategy.py      # Placeholder (future ambulance preemption)
-│
-├── env/                           # Gym-style RL environment
-│   ├── traffic_env.py             # reset()/step() over the simulator
-│   └── state_builder.py           # 23-dim observation + tabular discretizer
-│
-├── rl/                            # Reinforcement-learning agents
-│   ├── agents.py                  # TabularQAgent (810-state Q-learning)
-│   ├── dqn.py                     # Pure-numpy DQN (MLP + replay + target)
-│   └── train.py                   # train_tabular / train_dqn loops
-│
-├── evaluation/
-│   └── evaluate.py                # Three-way strategy comparison harness
-│
-├── traffic_source/                # Vehicle source abstraction
-│   ├── base_source.py             # Abstract traffic source interface
-│   ├── profile_traffic_source.py  # Profile-driven arrivals (used by sim)
-│   ├── random_generator.py        # Random generator
-│   ├── yolo_generator.py          # Placeholder (future YOLO/OpenCV)
-│   └── sumo_generator.py          # Placeholder (future SUMO)
-│
-├── services/
-│   └── service_model.py           # Service-time-aware discharge model
-│
-├── analytics/
-│   ├── statistics.py              # KPI collection (wait, queue, throughput, congestion)
-│   └── logger.py                  # Per-tick CSV logging
-│
-├── config/                        # Centralized configuration
-│   ├── phases.py                  # Official 10-phase plan definition
-│   ├── simulation.py              # Timing / simulation parameters
-│   ├── density.py                 # Adaptive density configuration
-│   ├── rl.py                      # RL hyperparameters
-│   └── traffic_profiles.py        # Time-dependent traffic scenarios
-│
-├── results/                       # Experiment outputs
-│   ├── results_table.csv          # per-run raw KPIs (60 runs)
-│   └── model_cards.md             # dataset + model documentation
-│
-└── images/                        # Comparison & training-curve graphs
-    ├── G1_avg_wait_comparison.png
-    ├── G2_throughput_comparison.png
-    ├── G3_avg_queue_comparison.png
-    └── G4_rl_training_curves.png
+├── core/                        # domain model
+│   ├── enums.py                 # PhaseType, MovementType, VehicleType, Priority, SignalState
+│   ├── vehicle.py, queue.py, lane.py, signal.py
+│   ├── movement.py              # approach + movement type + lane + signal (16 total)
+│   ├── approach.py              # 4 lanes / movements per approach
+│   ├── phase.py                 # a set of movements that are green together
+│   └── intersection.py          # 4 approaches; spawning and aggregate state
+├── config/
+│   ├── phases.py                # the official 10-phase plan + emergency phase builder
+│   ├── simulation.py            # tick, green/yellow, emergency timing, service times
+│   ├── traffic_profiles.py      # the 5 scenarios
+│   ├── density.py               # Density controller parameters
+│   └── rl.py                    # RL environment, agents, training, validation
+├── scheduler/traffic_scheduler.py
+├── strategies/                  # base_strategy, fixed_timer, density, rl_strategy
+│                                # (+ queue_relaxation / emergency placeholders)
+├── traffic_source/              # profile_traffic_source (used), random, yolo/sumo placeholders
+├── services/service_model.py
+├── analytics/                   # statistics.py (KPIs), logger.py (per-tick CSV)
+├── env/                         # traffic_env.py (Gym-style env), state_builder.py
+├── rl/                          # agents.py (tabular Q), dqn.py (numpy DQN), train.py
+├── evaluation/evaluate.py       # quick side-by-side strategy comparison
+├── results/                     # results_table.csv, model_cards.md (generated)
+├── images/                      # G1–G4 charts (generated)
+└── models/                      # trained agents + training history (generated, gitignored)
 ```
 
 ---
 
 ## 3. Core Domain Model
 
-| Class            | Responsibility                                                        |
-|------------------|-----------------------------------------------------------------------|
-| `Vehicle`        | id, vehicle type, current lane, destination movement, priority        |
-| `Queue`          | FIFO of vehicles + aggregate waiting statistics                       |
-| `Lane`           | owns a `Queue`; one lane per movement                                 |
-| `Signal`         | RED / YELLOW / GREEN state machine                                    |
-| `Movement`       | ties an approach + movement type + lane + signal (16 movements total) |
-| `Approach`       | one of North / South / East / West, holding its movements             |
-| `Phase`          | a set of compatible movements served simultaneously                   |
-| `Intersection`   | 4 approaches; spawns, moves, and reports stats at the aggregate level |
+| Class | Responsibility |
+|---|---|
+| `Vehicle` | Type, priority (ambulance = HIGH), accumulated waiting time |
+| `Queue` | FIFO of vehicles; running total of their waiting time |
+| `Lane` | Owns a `Queue`; one lane per movement |
+| `Signal` | RED / YELLOW / GREEN |
+| `Movement` | Approach + movement type + lane + signal. 16 in total: North/South/East/West × Left/Straight/Right/U-turn |
+| `Approach` | The 4 movements of one direction |
+| `Phase` | A set of movements that are green together |
+| `Intersection` | The 4 approaches; spawning, waiting-time updates, the clock |
 
-### The 10-phase architecture
+**Traffic convention:** left-hand traffic. Left turns are the "free" movements and
+appear in most phases.
 
-The simulator uses the **official 10-phase plan** (defined in
-`config/phases.py`). Each phase is a fixed set of compatible movements; the
-scheduler only ever activates these predefined phases and never invents new
-movement combinations. An `EMERGENCY_OVERRIDE` phase is built dynamically
-from the ambulance's approach and does not modify the normal phase set.
+### The 10-phase plan
 
----
-
-## 4. Traffic Profiles (the Dataset)
-
-The system uses **simulation-generated synthetic traffic data** — there is
-no external dataset. Each profile is a schedule of time windows; each window
-specifies an independent arrival rate (vehicles/second) for every one of the
-16 incoming movements, plus a vehicle-mix distribution.
-
-The five scenarios used throughout this project:
-
-| Profile          | Description--------------------------------------------------------------------|
-| `LIGHT_TRAFFIC`  | Low volume, balanced across all movements.                         |
-| `NORMAL_TRAFFIC` | Average daytime flow with mild asymmetry.                          |
-| `RUSH_HOUR`      | Heavy morning/evening commuting, asymmetric.                       |
-| `NIGHT`          | Very low traffic, truck-heavy freight hours.                       |
-| `CUSTOM`         | Time-dependent: Morning → Rush → Normal → Evening.                 |
-
-Vehicle mix is per-profile (e.g. `CAR/BIKE/BUS/TRUCK/AMBULANCE`), and UTurn
-arrivals default to a small non-zero 5% of the straight volume.
+Defined in `config/phases.py` from the official phase diagrams. Each phase holds 7–8 of
+the 16 movements, and **every phase serves at least one movement on every approach**.
+The scheduler only ever activates these 10 phases, plus `EMERGENCY_OVERRIDE`, which is
+built at runtime and greens all 4 movements of the ambulance's approach. The plan is
+pinned movement for movement by `tests/test_phase_plan.py`.
 
 ---
 
-## 5. Scheduling Strategies
+## 4. Traffic Scenarios (the Dataset)
 
-All strategies implement the same `BaseStrategy` interface and are
-interchangeable in `Simulation`.
+Synthetic, generated by the seeded simulator; there is no external dataset. Each profile is a
+schedule of time windows; each window sets an arrival rate (vehicles/s) for every one of the 16
+movements, plus a vehicle mix.
 
-### 5.1 FixedTimerStrategy (Baseline 1)
-Round-robin scheduling with a fixed green duration per phase. The naive
-baseline.
+| Profile | Description |
+|---|---|
+| `LIGHT_TRAFFIC` | Low, balanced volume |
+| `NORMAL_TRAFFIC` | Average daytime flow, mild asymmetry |
+| `RUSH_HOUR` | Heavy, asymmetric commuting |
+| `NIGHT` | Very low volume, truck-heavy |
+| `CUSTOM` | Time-varying: morning → rush → normal → evening |
 
-### 5.2 DensityStrategy (Baseline 2)
-A percentile-based adaptive density controller. It observes **only the
-number of queued vehicles per approach** (never a vehicle's movement) and
-per decision cycle:
+Vehicle mix (default): car 70%, bike 18%, bus 6%, truck 5%, ambulance 1%.
 
-1. **Observe** — count queued vehicles on each approach.
-2. **Rank** — rank approaches 1 (most loaded) to 4 (relative to the current
-   state, not fixed thresholds).
-3. **Classify** — convert rank into density classes (HIGH / MEDIUM / LOW).
-4. **Fairness** — anti-starvation boost for approaches starved for too long.
-5. **Score phases** — score all 10 phases by `Σ(approach weight × phase
-   coverage)`; the highest wins.
-6. **Green time** — estimate a continuous-discharge green interval
-   (interval-merging / Teemo-Attacking intuition), clamped to
-   `[MIN_GREEN, MAX_GREEN]`.
+**RUSH_HOUR is over capacity.** Demand is about 3.3 veh/s against about 2.7 veh/s of
+service capacity, so queues grow under every controller, even with ambulances
+disabled. With 1% ambulances, one arrives roughly every 30 s, and a large share of that
+profile is spent in emergency preemption. It is kept deliberately as a stress test, and
+results are reported per profile so it can't dominate the averages.
 
-### 5.3 RLStrategy (Models 1 & 2)
-Wraps a trained RL agent behind the same `BaseStrategy` interface. At
-inference time it returns `argmax_a Q(state, a)` — a table lookup (tabular)
-or a single forward pass (DQN). No training happens live during evaluation.
+---
 
-### 5.4 Emergency
-Ambulance handling is entirely **rule-based** in the scheduler and always
-has priority over normal adaptive/RL scheduling:
+## 5. Signal Timing, Scheduling and Emergency Preemption
+
+`TrafficScheduler.update()` runs once per tick:
+
+1. **An emergency in progress** advances the emergency state machine (below) and stops there.
+2. **A new ambulance** queued on any approach (scanned North, South, East, West) starts preemption.
+3. **Otherwise, normal scheduling**: count down green; when it runs out, call
+   `strategy.on_green_end()` (extend, end, or hold). On ending: 2 s yellow, then
+   `strategy.decide_next_phase()` picks the next phase and its green time.
+
+`on_green_end()` returns `None` by default (no extension), so Fixed Timer and Density
+size their green up front. The RL strategy uses it to extend green in 5 s steps.
+
+### Emergency preemption
 
 ```
-NORMAL GREEN → YELLOW CLEARANCE → EMERGENCY GREEN → RESUME NORMAL
+NORMAL GREEN → 2 s YELLOW CLEARANCE → EMERGENCY GREEN (ambulance's approach only)
+            → held until the ambulance has cleared → RESUME NORMAL SCHEDULING
 ```
 
----
+- **Fail-safe:** the emergency green is released after 30 s even if the ambulance
+  hasn't cleared (for example, when it's stuck behind a long queue).
+- **Cooldown:** after a fail-safe release, that approach can't preempt again for 30 s,
+  so normal service really resumes. Without it, the still-queued ambulance was
+  re-detected on the next tick and the intersection never left emergency mode. Other
+  approaches can still preempt during the cooldown.
 
-## 6. Service Model
-
-`services/service_model.py` governs vehicle discharge. Each lane accumulates
-green time; a vehicle departs only once enough green time has built up to
-satisfy its type's service time:
-
-| Vehicle   | Service time (s) |
-|-----------|------------------|
-| BIKE      | 0.6              |
-| CAR       | 1.0              |
-| BUS       | 1.8              |
-| TRUCK     | 2.2              |
-| AMBULANCE | 0.8              |
-
-The scheduler remains completely unaware of service rates.
+Timings live in `config/simulation.py` (`EMERGENCY_YELLOW_TIME`, `EMERGENCY_MAX_TIMEOUT`,
+`EMERGENCY_COOLDOWN`).
 
 ---
 
-## 7. Analytics & KPIs
+## 6. Controllers (Strategies)
 
-`analytics/statistics.py` aggregates the core KPIs used in the results:
+All implement `BaseStrategy` and plug into `Simulation(strategy_key=...)` or `Simulation(strategy=...)`.
 
-- **average_waiting_time** — mean aggregate waiting time per sample.
-- **average_queue_length** — mean total queued vehicles per sample.
-- **throughput** — vehicles served per simulation second.
-- **congestion_ratio** — fraction of ticks with total queue ≥ 10.
-- **max_queue_by_movement** — peak queue observed per movement.
-- Plus vehicles served per movement/type, green time per phase, queue growth
-  / reduction rates, and Phase-3 adaptive metrics.
+### 6.1 Fixed Timer (baseline)
+Round-robin through PHASE_1 → PHASE_10 with a fixed 12 s green.
+
+### 6.2 Density (rule-based adaptive)
+Observes only the number of queued vehicles per approach. At each decision:
+
+1. **Rank** the 4 approaches by queue length (ties: North, South, East, West).
+2. **Classify** by rank ("quartile" mode: HIGH, MEDIUM, MEDIUM, LOW), with weights 3 / 2 / 1.
+3. **Score all 10 phases**: Σ over approaches of (weight × fraction of that approach's 4
+   movements the phase serves). The highest score wins; ties go to the lower phase number.
+4. **Phase-recency bonus**: a phase not chosen for 6+ decisions gets +3 per decision
+   waited. This keeps phases that are subsets of others (e.g. PHASE_1 ⊂ PHASE_8)
+   reachable.
+5. **Green time**: if the longest approach queue is ≥ 15 vehicles, green is extended
+   from 10 s in 5 s steps toward (longest queue ÷ 2 veh/s), capped at 40 s; otherwise 10 s.
+
+How it behaves in practice (5 profiles × 10 min, 214 decisions):
+
+- The **phase-recency bonus is active in 86% of decisions**, so it shapes most choices.
+- **Green is the 10 s minimum in 89% of decisions**.
+- The **approach-level starvation boost never fires.** It triggers when an approach
+  goes unserved for 4 decisions, but every phase serves every approach (§3), so that
+  can't happen. The phase-recency bonus is what actually provides fairness.
+
+Parameters: `config/density.py`.
+
+### 6.3 RLStrategy (learned)
+Wraps a trained agent (tabular Q or DQN) and acts greedily: `argmax_a Q(state, a)`.
+It uses extend-or-switch control (§9.2). No learning happens during evaluation.
 
 ---
 
-## 8. Reinforcement-Learning Pipeline
+## 7. Vehicle Discharge (Service Model)
 
-### 8.1 Gym-style environment (`env/`)
+Each green lane accumulates green time; the vehicle at the head of the queue leaves once
+the accumulated time covers its service time, and the remainder carries over.
 
-`TrafficRLEnv` wraps the simulator with a standard interface:
+| Vehicle | Service time (s) |
+|---|---|
+| Bike | 0.6 |
+| Car | 1.0 |
+| Bus | 1.8 |
+| Truck | 2.2 |
+| Ambulance | 0.8 |
+
+Yellow and red lanes don't discharge. The scheduler knows nothing about service rates.
+
+---
+
+## 8. Metrics
+
+Primary metric: **delay per vehicle**, the seconds a vehicle spends queued.
+
+| Metric | Definition |
+|---|---|
+| Avg / P95 / Max delay | Over every vehicle in the run. Vehicles still queued at the end count with the delay accrued so far, so leaving vehicles unserved never looks good |
+| Ambulance delay | The same, for ambulances only |
+| Avg queue | Total vehicles queued at the intersection, averaged over ticks |
+| Max lane queue | Longest single lane seen |
+| Throughput | Vehicles served per simulated second |
+| Congestion ratio | Fraction of ticks with ≥ 10 vehicles queued in total |
+| Queued veh-s | Legacy "average waiting time": the total waiting time of everyone queued, averaged over ticks. Vehicle-seconds, **not** seconds per vehicle |
+
+Implemented in `analytics/statistics.py`.
+
+---
+
+## 9. Reinforcement-Learning Pipeline
+
+### 9.1 Environment (`env/traffic_env.py`)
 
 ```
-reset()              -> 23-dim observation
-step(action)         -> (next_obs, reward, done, info)
-action_space         -> 10 (choose one of the 10 normal phases)
-observation_space    -> (23,)
+reset()        -> 23-dim observation at the first decision point
+step(action)   -> (next_obs, reward, done, info)      action in 0..9
+info           -> {"duration": seconds the step lasted, "truncated": bool}
 ```
 
-**State (23-dim observation)** — reuses exactly what the Density strategy
-already computes:
+The env drives the same scheduler, discharge and spawning code as `Simulation`. A
+**decision point** is the moment the scheduler asks the strategy for a decision. The env
+pauses mid-tick at that moment, hands the observation to the agent, and resumes the same
+tick with the chosen action, so no simulated time is spent waiting, and the reward
+returned by `step(a)` covers exactly the time `a` was in control.
 
-| indices | feature                                  |
-|---------|------------------------------------------|
-| 0–3     | queue length per approach (normalized)   |
-| 4–7     | percentile rank per approach (1..4)      |
-| 8–11    | starvation counters per approach         |
-| 12–21   | active-phase one-hot (10 normal phases)  |
-| 22      | elapsed seconds in the current phase     |
+**Observation** (built by one function for both training and inference, so the two can't differ):
 
-**Action** — pick one of the 10 phases at each decision point (a
-minimum-green boundary), not every tick.
+| Index | Feature |
+|---|---|
+| 0–3 | Queue per approach ÷ 50 |
+| 4–7 | Rank per approach, scaled to 0–1 |
+| 8–11 | Longest current wait per approach ÷ 60 s (capped at 3), the starvation signal |
+| 12–21 | Active phase, one-hot |
+| 22 | Elapsed green of the active phase ÷ 40 s |
 
-**Reward** (deliberately crude): `r = -sum(queue_lengths)` accumulated over
-the step — a "minimize congestion" proxy sufficient to get a learning signal.
+**Reward:** −(Σ over the step's ticks of total queue × 0.5 s) ÷ 100, i.e. the queueing
+delay in vehicle-seconds, scaled. The scale matters more than it looks; see §9.5.
 
-### 8.2 Tabular Q-learning (`rl/agents.py`)
-Discretizes the state into queue LOW/MED/HIGH per approach folded with the
-last-active-phase: `3⁴ × 10 = 810 states`, Q-table shape `(810, 10)`.
-Standard Q-learning with epsilon-greedy exploration. Fast, interpretable,
-the sanity baseline.
+**Episodes:** 1,200 ticks (10 min). The end of an episode is a **truncation**, not a
+terminal state, so learners still bootstrap from the final state.
 
-### 8.3 DQN (`rl/dqn.py`)
-A hand-rolled, **pure-numpy** MLP: `23 → 64 (ReLU) → 64 (ReLU) → 10 Q-values`.
-Includes experience replay, a target network, and epsilon-greedy. No
-deep-learning framework dependency — gradient updates are implemented
-manually and validated independently on a tiny XOR problem.
+### 9.2 Actions: extend-or-switch
+Each time the active green runs out, the agent picks one of the 10 phases:
 
-### 8.4 Training (`rl/train.py`)
-- Episode = a fixed-length window (`EPISODE_LENGTH` ticks) of a traffic
-  profile.
-- Profiles cycle across episodes (`LIGHT/NORMAL/RUSH/NIGHT/CUSTOM`) so the
-  agent does not overfit to a single pattern.
-- A fixed per-episode seed keeps evaluation reproducible.
-- The per-episode cumulative reward curve is the key evidence of learning.
+- **Same phase** → extend green by 5 s.
+- **Another phase** → 2 s yellow, then that phase with a 10 s minimum green.
+- **At the 40 s cap**, "extend" advances to the next phase in order (the agent can see elapsed green).
+
+These are the same 10 / +5 / 40 s bounds Density uses. Steps therefore last 5 s or 12 s
+(longer if an ambulance interrupts), so discounting is **per second**: γ = 0.9925^seconds
+(≈ 0.9 for a 14 s step).
+
+### 9.3 Agents
+- **Tabular Q-learning** (`rl/agents.py`): state = queue LOW/MED/HIGH per approach
+  (< 5, 5–19, ≥ 20) × active phase × elapsed-green level (< 15 s, 15–35 s, cap) =
+  **2,430 states**; Q-table (2430, 10).
+- **DQN** (`rl/dqn.py`), all numpy: MLP 23 → 64 → 64 → 10 (ReLU), Adam optimiser,
+  experience replay (20k), target network (synced every 200 updates), **Double-DQN**
+  targets, **Huber loss**, gradient-norm clipping (10). The backprop is checked
+  against finite differences in the tests.
+
+### 9.4 Training (`rl/train.py`)
+- 500 episodes per agent; the profile rotates every episode, and each episode has its own seed.
+- Epsilon decays linearly from 1.0 to 0.05 over the first 70% of episodes, then stays at 0.05.
+- Every 25 episodes the **greedy** policy is scored on held-out validation seeds, using
+  the same protocol as the final evaluation. The **best checkpoint** is kept.
+- `run_experiments.py` trains each agent from 3 seeds (42, 7, 123) in parallel.
+
+### 9.5 Reward scale and the Huber loss
+The Huber loss switches from quadratic to linear at a fixed TD error (δ = 1). With rewards
+divided by 1000, light-traffic TD errors (~0.01) were negligible next to rush-hour errors
+(capped at δ), so the DQN effectively ignored light traffic: its Q-values there were
+~100× smaller than in rush hour, and the gap between its best and second-best action
+(~0.02) was below the network's fitting error. Dividing by 100 lifts light-traffic errors to
+~0.1 while rush-hour gradients stay capped, rebalancing what the network learns from.
+
+Chosen on the validation seeds (5 variants tried, test set untouched until the final run):
+
+| Variant (validation avg delay, s) | Light | Normal | Rush | Night | Custom | Mean |
+|---|---|---|---|---|---|---|
+| ÷1000 (previous) | 20.1 | 11.0 | 63.4 | 18.4 | 12.2 | 25.0 |
+| ÷1000 + value rescaling | 17.6 | 11.1 | 67.8 | 21.3 | 11.0 | 25.8 |
+| ÷100 + value rescaling | 13.6 | 10.1 | 56.5 | 16.4 | 10.6 | 21.4 |
+| **÷100** (chosen) | 10.9 | 10.0 | 50.5 | 11.3 | 10.9 | 18.7 |
+| ÷10 | 10.8 | 10.7 | 46.9 | 11.4 | 11.3 | 18.2 |
+
+÷10 is within seed noise of ÷100; ÷100 was kept as the smaller change. Value rescaling
+(h(Q) = sign(Q)(√(|Q|+1) − 1) + εQ, as in R2D2) is implemented and tested but off
+(`DQN_VALUE_RESCALING`), since it didn't help here.
 
 ---
 
-## 9. Controlled Experiment Methodology
+## 10. Experiment Methodology
 
-`run_experiments.py` runs a **controlled, apples-to-apples experiment**:
+`run_experiments.py`:
 
 - **4 controllers**: Fixed Timer, Density, Q-Learning, DQN.
-- **Identical traffic profiles** for every controller: `LIGHT_TRAFFIC`,
-  `NORMAL_TRAFFIC`, `RUSH_HOUR`, `NIGHT`, `CUSTOM`.
-- **Identical simulation duration**: `EVAL_TICKS = 200` ticks per run.
-- **Multiple seeds**: `[1, 2, 3]` for a stable average.
+- **Identical conditions**: 5 profiles × 5 test seeds × 1,200 ticks (10 min). Only the
+  strategy differs.
+- **Disjoint seeds**: training 42+ / 7+ / 123+, validation 1000–1001, test 1–5.
+- **RL uncertainty**: each RL agent is evaluated once per training seed; tables show the
+  mean ± std across training seeds.
+- **Aggregation**: pooled means, a per-profile table, and a profile-balanced headline
+  (mean over profiles of the % delay reduction vs Fixed Timer), so the oversaturated
+  RUSH_HOUR can't dominate.
+- **Significance**: paired bootstrap 95% CI of DQN − Density average delay over the 25
+  (profile, seed) pairs.
 
-The ONLY difference between controllers is the scheduling policy (the
-pluggable `BaseStrategy`). Traffic generation, duration, and seed are
-identical, so the comparison is fair.
-
-The RL agents are trained first (tabular then DQN, 150 episodes each), then
-evaluated in **self-driving inference mode** (argmax over the learned
-Q/policy) — no training happens during evaluation.
-
-Total runs: `4 controllers × 5 profiles × 3 seeds = 60` simulation runs.
-
----
-
-## 10. Actual Model-Performance Results
-
-These numbers are **real** — every value comes from an actual simulation
-run. Nothing is fabricated or cherry-picked. The RL agents underperform the
-engineered Density baseline, which is an honest and acceptable result.
-
-### Performance table (averaged over 5 profiles × 3 seeds = 15 runs each)
-
-| Controller   | Avg Wait | Avg Queue | Max Queue | Throughput | Congestion |
-|--------------|----------|-----------|-----------|------------|------------|
-| Fixed Timer  | 425.787  | 22.578    | 16.467    | 1.140      | 0.547      |
-| **Density**  | **239.800** | **16.003** | **10.400** | **1.193** | **0.506** |
-| Q-Learning   | 683.657  | 27.679    | 22.467    | 0.946      | 0.580      |
-| DQN          | 1185.705 | 37.462    | 26.333    | 0.710      | 0.586      |
-
-- **Wait / Queue / Max Queue / Congestion**: lower is better.
-- **Throughput**: higher is better.
-
-**Best overall: Density** (lowest wait, lowest queue, lowest max queue,
-highest throughput, lowest congestion).
-
-### Interpretation
-On this small single-intersection problem, the engineered rule-based Density
-controller beats the thinly-trained RL agents. The RL training curves do show
-learning (peaks of −105 for tabular, −41 for DQN), but the crude
-`-sum(queue)` reward objective does not translate into better end-to-end KPIs
-than the hand-tuned controller. This is expected and honestly reported — the
-RL contribution is the learned-policy framework, not a guaranteed win over
-expert-designed heuristics on a toy problem.
-
-### Training curves
-- `tabular_q`: first episode reward −589, last episode reward −6946
-  (peak −105).
-- `dqn`: first episode reward −240, last episode reward −6631 (peak −41).
-
-### Generated graphs (`images/`)
-- `G1_avg_wait_comparison.png` — average waiting time (lower better).
-- `G2_throughput_comparison.png` — throughput (higher better).
-- `G3_avg_queue_comparison.png` — average queue (lower better).
-- `G4_rl_training_curves.png` — episode reward vs episode (RL learning).
-
-### Raw data (`results/results_table.csv`)
-All 60 per-run KPIs (controller × profile × seed) are stored for audit.
+Outputs: `results/results_table.csv` (one row per run), `results/model_cards.md`,
+`images/G1–G4`, `models/` (per-seed agents + `training_history.json`). A full run takes
+about 3 min on 12 cores; `--use-saved` re-evaluates in about 10 s and reproduces the outputs exactly.
 
 ---
 
-## 11. How to Run
+## 11. Results Summary
 
-### Run the interactive simulator
+Current numbers: [results/model_cards.md](results/model_cards.md). What they show:
+
+- **DQN is the best controller overall**: about 32% less average delay than Density, with a
+  95% CI that excludes zero, plus shorter queues, higher throughput, a better 95th-percentile
+  wait, and half the ambulance delay (fewer vehicles queued ahead of the ambulance). It is
+  very consistent across training seeds (± 0.2 s).
+- **It wins or ties in every scenario**: the largest gains are in rush hour and on the custom
+  day, it's slightly ahead in light and normal traffic, and tied at night.
+- **Its worst-case (max) delay is longer than Density's.** The reward is total delay, which
+  doesn't specifically penalise making one vehicle wait a long time; Density's
+  phase-rotation bonus does.
+- **Tabular Q-learning is behind Fixed Timer.** Its coarse LOW/MED/HIGH state can't tell
+  "busy" from "gridlocked", which is the motivation for the DQN. It is also sensitive to
+  tiny perturbations: a 1e-16 rounding difference flipping one tied `argmax` late in
+  training is enough to send a run down a different path.
+
+![Delay by profile](images/G3_delay_by_profile.png)
+![Learning curves](images/G4_rl_training_curves.png)
+
+---
+
+## 12. Testing
+
+`python -m pytest` runs 69 tests (~40 s), also in CI on every push and pull request.
+
+| Area | Examples |
+|---|---|
+| Phase plan | Pinned to the official diagrams; all 16 movements served; emergency phase = one approach |
+| Scheduler | 12 s green → 2 s yellow → next; rotation; extension and hold hooks |
+| Emergency | Clearance → emergency green → resume; fail-safe + cooldown |
+| Discharge & metrics | Per-type service times; KPI definitions; delay including queued vehicles |
+| RL environment | Reward credited to the right action; training/inference features identical; durations; truncation |
+| Learning code | Q-update maths; finite-difference gradient check; Adam; DQN learns a bandit |
+| Regression | Exact golden KPIs for Fixed Timer and Density; end-to-end harness in quick mode |
+
+---
+
+## 13. How to Run
+
 ```bash
-python main.py
+pip install -r requirements.txt
+python main.py                          # live console simulation
+python run_experiments.py               # full experiment (~3 min)
+python run_experiments.py --use-saved   # re-evaluate saved models (~10 s)
+python plot_rewards.py [n_episodes]     # quick tabular-Q training run + reward plot
+python -m pytest                        # tests
 ```
 
-### Run the controlled RL experiment (produces table + graphs + docs)
-```bash
-python run_experiments.py
-```
-Outputs:
-- `results/results_table.csv` — raw per-run KPIs.
-- `results/model_cards.md` — dataset/model documentation.
-- `images/G1..G4_*.png` — the 4 critical graphs.
+Environment variables for `run_experiments.py`: `EXPERIMENTS_OUT=<dir>` redirects all
+outputs; `EXPERIMENTS_QUICK=1` runs a tiny configuration in seconds (used by the tests).
 
-### Plot the tabular-Q reward curve
-```bash
-python plot_rewards.py [n_episodes]
-```
+Side-by-side comparison of rule-based strategies:
 
-### Three-way comparison (one-liner)
-```bash
-python -c "from evaluation.evaluate import *; from strategies.fixed_timer_strategy import *; from strategies.density_strategy import *; from strategies.rl_strategy import *; from rl.train import train_tabular; a,_=train_tabular(n_episodes=30,verbose=False); print_comparison(evaluate_strategies({'fixed_timer':FixedTimerStrategy(),'density':DensityStrategy(),'rl':RLStrategy(agent=a)}))"
+```python
+from evaluation.evaluate import evaluate_strategies, print_comparison
+from strategies.fixed_timer_strategy import FixedTimerStrategy
+from strategies.density_strategy import DensityStrategy
+
+print_comparison(evaluate_strategies({"fixed_timer": FixedTimerStrategy(),
+                                      "density": DensityStrategy()}))
 ```
 
 ---
 
-## 12. Reproducibility Notes
+## 14. Reproducibility
 
-- **Seeds**: `config/simulation.py` (`SEED=42`) and the experiment harness
-  (`SEEDS=[1,2,3]`) make all runs deterministic.
-- **No fabrication**: the results table, CSV, graphs, and model cards are
-  produced directly from actual simulation runs by `run_experiments.py`.
-- **Dependencies**: only `numpy` (required) and `matplotlib` (for graphs;
-  the harness degrades to ASCII output if unavailable).
-- **Dataset**: synthetic, generated by the project's deterministic traffic
-  simulator — no external dataset is required or used.
+- Every random source is seeded; the same seed gives identical results, verified by
+  repeated full runs producing byte-identical CSVs.
+- Worker processes use a single BLAS thread (set before numpy loads) to avoid memory
+  exhaustion and keep floating-point results stable.
+- Trained models aren't committed (they're regenerated deterministically);
+  `models/training_history.json` lets `--use-saved` rebuild the full report.
+- Dependencies: numpy, matplotlib, pytest.
+
+---
+
+## 15. Known Limitations
+
+- **Worst-case delay**: the DQN's maximum delay is longer than Density's; the delay-based
+  reward doesn't penalise long individual waits (a fairness term is the natural next step).
+- **RUSH_HOUR** is over capacity, with frequent ambulances (§4).
+- **No conflict-matrix test**: the phase plan is pinned to the official diagrams, but
+  movement compatibility isn't independently verified (no authoritative conflict table in the code).
+- **Density's approach-level starvation boost is inert** with this phase plan (§6.2).
+- **Placeholders**: queue-relaxation and emergency strategies, YOLO and SUMO traffic sources.
+- **Single intersection**: no coordination between intersections.

@@ -41,9 +41,12 @@ MAX_GREEN = 40.0
 EPISODE_LENGTH = 1200        # ticks (= 10 simulated minutes, ~40 decisions)
 PROFILES = ("LIGHT_TRAFFIC", "NORMAL_TRAFFIC", "RUSH_HOUR", "NIGHT", "CUSTOM")
 
-# Reward scale (vehicle-seconds). Moderate traffic gives |r| of order 0.1-1
-# per decision; oversaturated rush hour gives |r| of order 10.
-REWARD_SCALE = 1000.0
+# Reward scale (vehicle-seconds). Chosen on the validation seeds: at 1000,
+# light-traffic TD errors (~0.01) were negligible next to rush-hour errors
+# (clipped at DQN_HUBER_DELTA = 1), so the DQN effectively ignored light
+# traffic. At 100, light-traffic errors (~0.1) carry weight while rush-hour
+# gradients stay capped by the Huber loss. (10 was indistinguishable from 100.)
+REWARD_SCALE = 100.0
 
 # Observation vector (23-dim).
 QUEUE_NORM = 50.0
@@ -73,16 +76,26 @@ DQN_EPISODES = 500
 DQN_LEARNING_RATE = 0.001    # Adam
 DQN_HUBER_DELTA = 1.0        # TD errors beyond this get a linear (not squared) loss
 DQN_GRAD_CLIP = 10.0         # max global gradient norm per update
+# Value rescaling: the network learns h(Q) = sign(Q)(sqrt(|Q|+1)-1) + eps*Q.
+# Q-values differ ~100x between light traffic and rush hour; without this,
+# fitting error at rush-hour scale swamps the small action gaps that decide
+# light-traffic actions. h is monotonic, so the optimal policy is unchanged.
+# Ablation (validation seeds): no benefit here, so off. With REWARD_SCALE
+# 1000 it traded light-traffic gains for rush/night losses; combined with a
+# larger reward it was worse than the larger reward alone.
+DQN_VALUE_RESCALING = False
+DQN_VALUE_RESCALING_EPS = 1e-2
 
 # ---------------------------------------------------------------------------
 # Validation during training (greedy policy on held-out seeds)
 # ---------------------------------------------------------------------------
-# Mirrors the final evaluation protocol (run_experiments: 5 profiles x 3
-# seeds x 200 ticks) so "best on validation" means "best on the metric we
-# report" - but on seeds disjoint from training (42+) and evaluation (1-3).
+# Mirrors the final evaluation protocol (run_experiments: every profile,
+# 1200 ticks, average delay per vehicle) so "best on validation" means "best
+# on the metric we report" - but on seeds disjoint from training (SEED+) and
+# evaluation (1-5).
 VALIDATION_EVERY = 25        # episodes between validation runs
-VALIDATION_SEEDS = (1000, 1001, 1002)
-VALIDATION_TICKS = 200
+VALIDATION_SEEDS = (1000, 1001)
+VALIDATION_TICKS = 1200
 
 SEED = 42
 NUMPY_SEED = 42
