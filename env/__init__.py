@@ -6,12 +6,12 @@ standard reset()/step() interface so any reinforcement-learning agent can
 drive the simulator without touching the scheduler/controller code.
 
 The environment:
-    - observation : 23-dim vector (queue, rank and longest wait per approach,
-                    active-phase one-hot, elapsed green), built by
+    - observation : per-lane vector (count, mean/longest wait, long waiters
+                    per lane; active-phase one-hot; elapsed green), built by
                     RLStrategy.observe() for training and inference alike.
     - action      : one of the 10 phases each time the active green runs
                     out (same phase = extend 5 s, other phase = switch).
-    - reward      : -(queueing delay in vehicle-seconds over the step) / 1000.
+    - reward      : -(wait-weighted queueing delay over the step) / REWARD_SCALE.
     - done        : episode time budget used up (a truncation:
                     info["truncated"] is True and learners still bootstrap).
 

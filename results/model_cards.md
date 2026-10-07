@@ -10,14 +10,14 @@
 
 **Known scenario property**: RUSH_HOUR demand (~3.3 veh/s) exceeds the intersection's service capacity (~2.7 veh/s), so queues grow under every controller, and ~1% of vehicles are ambulances (about one every 30 s), so most of that profile is spent in rule-based emergency preemption. It is kept as an oversaturated stress test; per-profile results below keep it from dominating.
 
-### State features (23-dimensional observation)
+### State features (75-dimensional observation)
 
-- 4  queue lengths (per approach)
-- 4  percentile ranks (per approach)
-- 4  longest current wait (per approach; starvation signal)
+The controller sees the intersection only through a **perception** layer: per lane, the vehicles it can see and how long each has waited (what a camera with detection + tracking can provide). Features:
+
+- 16 lanes x 4: vehicle count, mean wait, longest wait, and number of vehicles waiting more than 60 s
 - 10 active-phase one-hot values
 - 1  elapsed green time of the active phase
-- **23 total**, computed by one function in both training and inference
+- **75 total**, computed by one function in both training and inference
 
 ### Action space (10 discrete actions, extend-or-switch)
 
@@ -28,10 +28,11 @@
 ### Reward
 
 ```
-reward = -(sum over the step's ticks of total_queue * tick_seconds) / 100
+cost per tick = sum over queued vehicles of (1 + max(0, wait - 60) / 30) * tick_seconds
+reward = -(sum of tick costs over the step) / 100
 ```
 
-Queueing delay in vehicle-seconds. Discount is per simulated second (gamma = 0.9925 ** step_seconds); episode time limits are treated as truncation, not termination.
+Every waiting vehicle costs 1 per second, and more the longer *it* has waited (3/s at 120 s, 5/s at 180 s). Because the cost is summed over vehicles, many long waiters cost proportionally more than one. Discount is per simulated second (gamma = 0.9925 ** step_seconds); episode time limits are treated as truncation, not termination.
 
 ## Models
 
@@ -43,7 +44,7 @@ Queueing delay in vehicle-seconds. Discount is per simulated second (gamma = 0.9
 ### 2. DQN (Deep Q-Network)
 
 ```
-23 inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values
+75 inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values
 ```
 
 - Pure-numpy MLP and Adam optimizer (no deep-learning framework).
@@ -65,8 +66,8 @@ Mean over all profiles and test seeds. RL: mean ± std across training seeds.
 |---|---|---|---|---|---|---|---|---|
 | Fixed Timer | 31.0 | 112.1 | 178.0 | 15.6 | 71.2 | 1.224 | 5791.7 | +0.0% |
 | Density | 26.6 | 89.6 | 141.5 | 13.1 | 61.8 | 1.250 | 4369.7 | +16.8% |
-| Q-Learning | 37.2 ± 1.2 | 150.3 ± 6.6 | 254.1 ± 7.5 | 15.0 ± 1.6 | 72.5 ± 2.5 | 1.239 ± 0.008 | 5601.6 ± 269.5 | -45.1% |
-| DQN | 18.0 ± 0.2 | 74.9 ± 0.5 | 183.4 ± 8.4 | 6.5 ± 0.6 | 37.5 ± 3.5 | 1.330 ± 0.011 | 2369.7 ± 685.6 | +36.2% |
+| Q-Learning | 34.3 ± 2.1 | 129.0 ± 9.3 | 224.4 ± 14.8 | 14.8 ± 0.8 | 71.2 ± 3.8 | 1.238 ± 0.011 | 5203.3 ± 356.2 | -27.2% |
+| DQN | 18.7 ± 1.6 | 66.7 ± 5.8 | 130.3 ± 12.6 | 8.3 ± 1.2 | 39.5 ± 3.9 | 1.324 ± 0.013 | 1994.0 ± 336.3 | +34.2% |
 
 _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean, over profiles, of the % reduction in avg delay vs Fixed Timer (positive = better), so every profile counts equally._
 
@@ -76,22 +77,33 @@ _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean
 |---|---|---|---|---|---|
 | Fixed Timer | 13.5 | 18.3 | 85.8 | 16.0 | 21.6 |
 | Density | 11.8 | 11.0 | 76.3 | 13.9 | 19.9 |
-| Q-Learning | 28.0 | 20.7 | 78.5 | 25.7 | 32.7 |
-| DQN | 11.1 | 9.2 | 45.7 | 14.0 | 9.7 |
+| Q-Learning | 16.7 | 25.3 | 76.0 | 22.8 | 30.9 |
+| DQN | 13.2 | 8.8 | 49.1 | 13.1 | 9.4 |
 
 ### DQN vs Density
 
-Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-8.62 s** (95% bootstrap CI -13.50 to -4.17 s). The interval excludes 0.
+Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-7.84 s** (95% bootstrap CI -12.33 to -3.73 s). The interval excludes 0.
+
+### Robustness and deployment options (same trained DQNs)
+
+| Variant | Avg delay/veh (s) | P95 delay (s) | Max delay (s) | Ambulance delay (s) | Avg queue (veh) | Throughput (veh/s) |
+|---|---|---|---|---|---|---|
+| DQN | 18.7 ± 1.6 | 66.7 ± 5.8 | 130.3 ± 12.6 | 8.3 ± 1.2 | 39.5 ± 3.9 | 1.324 ± 0.013 |
+| DQN + camera noise | 19.2 ± 0.2 | 71.4 ± 2.2 | 127.6 ± 3.0 | 8.1 ± 0.4 | 40.3 ± 0.7 | 1.317 ± 0.007 |
+| DQN + max-red 90 s | 20.2 ± 1.0 | 72.7 ± 2.9 | 117.0 ± 5.9 | 9.3 ± 0.9 | 45.4 ± 2.6 | 1.300 ± 0.006 |
+
+- **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% lost tracks). Assumed rates, to be calibrated on real footage.
+- **Max-red 90 s**: optional safety rule; a lane with vehicles that has been red longer than 90 s is served next. Off by default (on validation it lowered worst-case waits but cost more average delay than the pre-set 0.5 s limit).
 
 ## Training curves
 
 Greedy policy scored every 25 episodes on validation seeds [1000, 1001] (1200 ticks per profile), avg delay per vehicle (s); best checkpoint kept:
 
-- Q-Learning (seed 42): 113.1 untrained -> best 34.9 at episode 500.
-- Q-Learning (seed 7): 113.1 untrained -> best 37.0 at episode 250.
-- Q-Learning (seed 123): 113.1 untrained -> best 36.7 at episode 475.
-- DQN (seed 42): 87.5 untrained -> best 18.5 at episode 350.
-- DQN (seed 7): 103.0 untrained -> best 18.7 at episode 400.
-- DQN (seed 123): 36.1 untrained -> best 18.3 at episode 475.
+- Q-Learning (seed 42): 113.1 untrained -> best 32.2 at episode 200.
+- Q-Learning (seed 7): 113.1 untrained -> best 38.1 at episode 425.
+- Q-Learning (seed 123): 113.1 untrained -> best 33.9 at episode 300.
+- DQN (seed 42): 75.1 untrained -> best 19.3 at episode 175.
+- DQN (seed 7): 72.2 untrained -> best 17.6 at episode 250.
+- DQN (seed 123): 58.5 untrained -> best 20.3 at episode 425.
 - Fixed Timer on the same validation set: 35.2.
 - Density on the same validation set: 27.3.

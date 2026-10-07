@@ -10,7 +10,7 @@ backprop are validated by a finite-difference gradient check
 non-convergence can never be attributed to a backprop bug.
 
 Why numpy:
-    A 10-action / ~23-dim state problem is small enough that a hand-rolled
+    A 10-action / ~75-dim state problem is small enough that a hand-rolled
     MLP with manual forward/backward passes is simple to get right, and it
     removes an entire class of "why won't torch install/import" failure modes
     that have nothing to do with the project. It is also a better demo talking
@@ -233,7 +233,7 @@ class ReplayBuffer:
 
 class DQNAgent:
     """
-    Deep Q-Network agent over the raw 23-dim observation.
+    Deep Q-Network agent over the raw observation vector.
 
     Attributes:
         policy_net (MLP): online network.

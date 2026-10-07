@@ -36,7 +36,7 @@ def _record_ticks(env):
 def test_reset_stops_at_first_decision_point():
     env = _env()
     obs = env.reset()
-    assert obs.shape == (23,)
+    assert obs.shape == (rl_config.OBS_DIM,)
     assert env.strategy.awaiting_action
     assert env.tick == 0
 
@@ -73,7 +73,7 @@ def test_extend_at_max_green_advances_to_next_phase():
     env.step(0)                                       # 10 s
     for _ in range(6):                                # +30 s -> 40 s (the cap)
         env.step(0)
-    assert env.strategy.last_obs[22] * rl_config.MAX_GREEN_NORM == pytest.approx(40.0)
+    assert env.strategy.last_obs[-1] * rl_config.MAX_GREEN_NORM == pytest.approx(40.0)
     env.step(0)                                       # "extend" at the cap
     assert env.scheduler.active_phase_type.name == "PHASE_2"
 

@@ -18,15 +18,19 @@
 ### Evaluation and quality
 - [x] Per-vehicle delay metrics (avg / P95 / max / ambulance)
 - [x] Experiment harness: 10-min runs × 5 profiles × 5 test seeds; RL trained from 3 seeds in parallel; per-profile results; bootstrap CI
-- [x] pytest suite (69 tests) with golden KPIs, gradient check and harness smoke test; CI on GitHub Actions
+- [x] pytest suite (76 tests) with golden KPIs, gradient check and harness smoke test; CI on GitHub Actions
 - [x] Documentation refresh (README, PROJECT_DOCUMENTATION, TODO, model card, docstrings)
 
 ## Next
 
 - [x] **RL in light/night traffic.** Fixed by rebalancing the reward scale against the
-      Huber loss (validated on held-out seeds). DQN now beats or ties Density in every scenario.
-- [ ] **DQN worst-case delay.** Its maximum delay is still longer than Density's.
-      Candidate: a longest-wait penalty in the reward.
+      Huber loss (validated on held-out seeds). Since Step 8's fairness reward the DQN is
+      slightly behind Density in light traffic only (13.2 vs 11.8 s).
+- [x] **DQN worst-case delay.** Wait-aware reward + per-lane long-waiter features (Step 8);
+      the DQN's longest wait is now shorter than Density's. Optional max-red safety rule added.
+- [ ] **Visual input phase.** Camera pipeline (YOLO detection + tracking such as ByteTrack,
+      lane regions per camera) implementing `perception.observe()`; calibrate
+      `config/perception.py` error rates on real footage; re-test noise-aware training.
 - [ ] **Phase-conflict test.** Needs an authoritative movement conflict matrix for the
       10-phase plan (left-hand traffic).
 - [ ] **Density approach-level starvation boost** never fires with this phase plan (every
@@ -36,7 +40,6 @@
       near-capacity rush profile.
 
 ## Future integrations
-- [ ] YOLO / OpenCV vehicle detection as a traffic source (`traffic_source/yolo_generator.py`)
 - [ ] SUMO integration (`traffic_source/sumo_generator.py`)
 - [ ] Web dashboard
 - [ ] Database logging

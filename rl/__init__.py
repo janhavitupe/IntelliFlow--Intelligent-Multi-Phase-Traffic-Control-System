@@ -6,7 +6,7 @@ Reinforcement-learning agents and training loops for Phase 4.
     - TabularQAgent : Q-learning over a discretized state (2430 buckets).
     - DQNAgent      : Deep Q-Network (pure-numpy MLP + Adam, replay buffer,
                       target network, Double-DQN, Huber loss) over the raw
-                      23-dim observation.
+                      observation vector.
     - train_tabular / train_dqn : one shared training loop (rotating
                       profiles, held-out validation, best-checkpoint
                       selection); each returns (agent, history).

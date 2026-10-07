@@ -62,11 +62,13 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
 
 import numpy as np  # noqa: E402  (must follow the thread limits above)
 
+from config import perception as perception_config
 from config import rl as rl_config
 from simulation import Simulation
 from strategies.fixed_timer_strategy import FixedTimerStrategy
 from strategies.density_strategy import DensityStrategy
 from strategies.rl_strategy import RLStrategy
+from perception import NoisyPerception
 from rl.train import train_tabular, train_dqn, score_policy
 from rl.agents import TabularQAgent
 from rl.dqn import DQNAgent
@@ -94,6 +96,14 @@ MODEL_DIR = os.path.join(_ROOT, "models")
 RULE_BASED = ["Fixed Timer", "Density"]
 RL_AGENTS = ["Q-Learning", "DQN"]
 CONTROLLERS = RULE_BASED + RL_AGENTS
+
+# Robustness / deployment-option evaluations of the SAME trained DQNs (no
+# selection is made with these; they only report how the policy holds up).
+SAFETY_MAX_RED = 90.0
+VARIANT_ROWS = {
+    "DQN + camera noise": {"perception": "noisy"},
+    f"DQN + max-red {SAFETY_MAX_RED:.0f} s": {"max_red": SAFETY_MAX_RED},
+}
 
 # (key, label, higher_is_better)
 METRICS = [
@@ -181,6 +191,12 @@ def strategy_factory(name, train_seed=None):
         return FixedTimerStrategy
     if name == "Density":
         return DensityStrategy
+    if name in VARIANT_ROWS:
+        opts = VARIANT_ROWS[name]
+        agent = load_agent("DQN", train_seed)
+        noisy = opts.get("perception") == "noisy"
+        return lambda: RLStrategy(agent=agent, max_red=opts.get("max_red"),
+                                  perception=NoisyPerception(seed=0) if noisy else None)
     agent = load_agent(name, train_seed)
     return lambda: RLStrategy(agent=agent)
 
@@ -320,6 +336,11 @@ def print_tables(rows):
     mean, lo, hi = paired_bootstrap_ci(paired_delay_diffs(rows, "DQN", "Density"))
     print(f"\nDQN - Density avg delay: {mean:+.2f} s  (95% CI {lo:+.2f} .. {hi:+.2f})")
 
+    print("\nROBUSTNESS / OPTIONS (same trained DQNs)")
+    for name in ["DQN"] + list(VARIANT_ROWS):
+        mean, std, _ = controller_summary(rows, name)
+        print(f"{name:<22}" + "".join(f"{fmt(mean[k], std[k], d):>16}" for k, d in cols))
+
 
 def make_graphs(rows, training, out_dir):
     try:
@@ -421,14 +442,17 @@ def write_model_card(rows, training, path):
         "of that profile is spent in rule-based emergency preemption. It is kept as an "
         "oversaturated stress test; per-profile results below keep it from dominating.")
     add("")
-    add("### State features (23-dimensional observation)")
+    add(f"### State features ({rl_config.OBS_DIM}-dimensional observation)")
     add("")
-    add("- 4  queue lengths (per approach)")
-    add("- 4  percentile ranks (per approach)")
-    add("- 4  longest current wait (per approach; starvation signal)")
+    add("The controller sees the intersection only through a **perception** layer: per "
+        "lane, the vehicles it can see and how long each has waited (what a camera with "
+        "detection + tracking can provide). Features:")
+    add("")
+    add("- 16 lanes x 4: vehicle count, mean wait, longest wait, and number of vehicles "
+        f"waiting more than {perception_config.LONG_WAIT_THRESHOLD:.0f} s")
     add("- 10 active-phase one-hot values")
     add("- 1  elapsed green time of the active phase")
-    add("- **23 total**, computed by one function in both training and inference")
+    add(f"- **{rl_config.OBS_DIM} total**, computed by one function in both training and inference")
     add("")
     add("### Action space (10 discrete actions, extend-or-switch)")
     add("")
@@ -441,11 +465,15 @@ def write_model_card(rows, training, path):
     add("### Reward")
     add("")
     add("```")
-    add(f"reward = -(sum over the step's ticks of total_queue * tick_seconds) / "
-        f"{rl_config.REWARD_SCALE:.0f}")
+    add("cost per tick = sum over queued vehicles of "
+        f"(1 + max(0, wait - {rl_config.WAIT_PENALTY_THRESHOLD:.0f}) / {rl_config.WAIT_PENALTY_SLOPE:.0f})"
+        " * tick_seconds")
+    add(f"reward = -(sum of tick costs over the step) / {rl_config.REWARD_SCALE:.0f}")
     add("```")
     add("")
-    add("Queueing delay in vehicle-seconds. Discount is per simulated second "
+    add("Every waiting vehicle costs 1 per second, and more the longer *it* has waited "
+        f"(3/s at 120 s, 5/s at 180 s). Because the cost is summed over vehicles, many long "
+        "waiters cost proportionally more than one. Discount is per simulated second "
         f"(gamma = {rl_config.GAMMA_PER_SECOND} ** step_seconds); episode time limits are "
         "treated as truncation, not termination.")
     add("")
@@ -460,7 +488,7 @@ def write_model_card(rows, training, path):
     add("### 2. DQN (Deep Q-Network)")
     add("")
     add("```")
-    add("23 inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values")
+    add(f"{rl_config.OBS_DIM} inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values")
     add("```")
     add("")
     add("- Pure-numpy MLP and Adam optimizer (no deep-learning framework).")
@@ -515,6 +543,23 @@ def write_model_card(rows, training, path):
         f"**{mean:+.2f} s** (95% bootstrap CI {lo:+.2f} to {hi:+.2f} s). "
         + ("The interval excludes 0." if lo > 0 or hi < 0 else
            "The interval includes 0: no significant difference."))
+    add("")
+    add("### Robustness and deployment options (same trained DQNs)")
+    add("")
+    add("| Variant | " + " | ".join(label for _, label, _ in METRICS[:6]) + " |")
+    add("|" + "---|" * 7)
+    for name in ["DQN"] + list(VARIANT_ROWS):
+        mean, std, _ = controller_summary(rows, name)
+        add(f"| {name} | " + " | ".join(
+            fmt(mean[k], std[k], 3 if k == "throughput" else 1) for k in METRIC_KEYS[:6]) + " |")
+    add("")
+    add("- **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% "
+        "phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% "
+        "lost tracks). Assumed rates, to be calibrated on real footage.")
+    add(f"- **Max-red {SAFETY_MAX_RED:.0f} s**: optional safety rule; a lane with vehicles "
+        f"that has been red longer than {SAFETY_MAX_RED:.0f} s is served next. Off by default "
+        "(on validation it lowered worst-case waits but cost more average delay than the "
+        "pre-set 0.5 s limit).")
     add("")
     add("## Training curves")
     add("")
@@ -574,7 +619,8 @@ def main():
             training = load_training()
 
         print("\n[2/3] Evaluating controllers...")
-        jobs = [(n, None) for n in RULE_BASED] + [(n, s) for n in RL_AGENTS for s in TRAIN_SEEDS]
+        jobs = ([(n, None) for n in RULE_BASED]
+                + [(n, s) for n in list(RL_AGENTS) + list(VARIANT_ROWS) for s in TRAIN_SEEDS])
         rows = [row for result in pool.map(_eval_worker, jobs) for row in result]
     print(f"  {len(rows)} evaluation runs")
 

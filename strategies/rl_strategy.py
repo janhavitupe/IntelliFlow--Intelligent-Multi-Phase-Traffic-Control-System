@@ -35,9 +35,16 @@ This strategy works in two modes:
 
 Both modes build the observation through the SAME observe() call, at the
 SAME moment, so the features the agent is trained on are exactly the
-features it acts on at inference. The strategy owns the one piece of
-decision-time bookkeeping those features need: when the current phase's
-green started (elapsed-in-phase).
+features it acts on at inference. The strategy sees the intersection only
+through a perception source (perception package): exact queues by default,
+or simulated camera errors (NoisyPerception). It also keeps the
+decision-time bookkeeping it needs: when the current phase's green started
+(elapsed-in-phase) and when each lane was last green (for the safety rule).
+
+Safety rule (optional, `max_red`): if a lane with visible vehicles has been
+red for longer than `max_red` seconds, the agent's choice is overridden with
+the phase that serves the most vehicles in such starved lanes. Like a real
+controller's maximum-red limit, it bounds waits even if the policy errs.
 
 NOTE ON IMPORTS: This module imports env.state_builder lazily (inside reset)
 to avoid a circular-import cycle (env.traffic_env imports RLStrategy from
@@ -50,6 +57,7 @@ emergency window.
 from .base_strategy import BaseStrategy, HOLD
 from config import rl as rl_config
 from config.phases import all_phase_types
+from perception import LANE_ORDER, GroundTruthPerception
 
 APPROACH_ORDER = ("North", "South", "East", "West")
 
@@ -66,20 +74,27 @@ class RLStrategy(BaseStrategy):
                                    decision point (consumed when asked).
         awaiting_action (bool): True while the scheduler is holding for an
                                 action from the env (training mode).
-        last_obs / last_state: observation (23-dim) and tabular bucket
+        last_obs / last_state: observation vector and tabular bucket
                                computed at the most recent decision point.
+        perception: where observations come from (ground truth by default).
+        max_red (float|None): safety rule threshold in seconds (None = off).
+        decisions / shield_overrides: counters for analysis.
 
     A strategy instance carries per-run bookkeeping, so use a fresh
     instance (or call reset()) for every simulation run.
     """
 
-    def __init__(self, agent=None, min_green=None, extension=None, max_green=None):
+    def __init__(self, agent=None, min_green=None, extension=None, max_green=None,
+                 perception=None, max_red=None):
         super().__init__(name="rl")
         self.agent = agent
         self.min_green = min_green if min_green is not None else rl_config.MIN_GREEN
         self.extension = extension if extension is not None else rl_config.GREEN_EXTENSION
         self.max_green = max_green if max_green is not None else rl_config.MAX_GREEN
+        self.perception = perception if perception is not None else GroundTruthPerception()
+        self.max_red = max_red
         self._phases = all_phase_types()
+        self._phase_lanes = None
         self.reset()
 
     # ------------------------------------------------------------------
@@ -98,10 +113,15 @@ class RLStrategy(BaseStrategy):
         self.awaiting_action = False
         self.last_obs = None
         self.last_state = None
+        self.last_observation = None
         self.obs_builder = ObservationBuilder()
         self.discretizer = Discretizer()
+        self.perception.reset()
         self._phase_started_at = 0.0
         self._next_phase = None
+        self._last_green = {lane: 0.0 for lane in LANE_ORDER}
+        self.decisions = 0
+        self.shield_overrides = 0
 
     # ------------------------------------------------------------------
     # Decision-time features
@@ -115,22 +135,20 @@ class RLStrategy(BaseStrategy):
         """
         active = current_phase.phase_type if current_phase is not None else None
         elapsed = self._elapsed(current_phase, time)
-        self.last_obs = self.obs_builder.build(intersection, active, elapsed)
+        if current_phase is not None:
+            for movement in current_phase.movements:   # green until now
+                self._last_green[movement.movement_id] = time
+        observation = self.perception.observe(intersection)
+        self.last_observation = observation
+        self.last_obs = self.obs_builder.build(observation, active, elapsed)
         self.last_state = self.discretizer.discretize(
-            self._approach_counts(intersection), active, elapsed
+            {a: observation.approach_count(a) for a in APPROACH_ORDER}, active, elapsed
         )
         return self.last_obs, self.last_state
 
     def _elapsed(self, current_phase, time):
         """Seconds since the current phase's green started (0 if none)."""
         return time - self._phase_started_at if current_phase is not None else 0.0
-
-    @staticmethod
-    def _approach_counts(intersection):
-        return {
-            name: intersection.get_approach(name).total_queue_length()
-            for name in APPROACH_ORDER
-        }
 
     def _get_action(self, intersection, current_phase, time):
         """
@@ -141,17 +159,39 @@ class RLStrategy(BaseStrategy):
             action = self.pending_action
             self.pending_action = None
             self.awaiting_action = False
-            return action
-
-        obs, state = self.observe(intersection, current_phase, time)
-        if self.agent is not None:
+        else:
+            obs, state = self.observe(intersection, current_phase, time)
+            if self.agent is None:
+                self.awaiting_action = True
+                return HOLD
             # DQN agents consume the raw observation, tabular ones the bucket.
-            return self.agent.select_action(
+            action = self.agent.select_action(
                 obs if hasattr(self.agent, "policy_net") else state
             )
+        self.decisions += 1
+        return self._shield(action, intersection, time)
 
-        self.awaiting_action = True
-        return HOLD
+    def _shield(self, action, intersection, time):
+        """Maximum-red safety rule: serve lanes that have waited too long."""
+        if self.max_red is None or self.last_observation is None:
+            return action
+        starved = {lane.movement_id: lane.count for lane in self.last_observation.lanes
+                   if lane.count > 0
+                   and time - self._last_green[lane.movement_id] > self.max_red}
+        if not starved:
+            return action
+        if self._phase_lanes is None:
+            from config.phases import build_phase_plan
+            self._phase_lanes = [
+                {m.movement_id for m in build_phase_plan(intersection)[pt].movements}
+                for pt in self._phases
+            ]
+        served = [sum(n for lane, n in starved.items() if lane in lanes)
+                  for lanes in self._phase_lanes]
+        best = max(range(len(served)), key=lambda i: served[i])
+        if best != action:
+            self.shield_overrides += 1
+        return best
 
     # ------------------------------------------------------------------
     # BaseStrategy interface (called by the scheduler)

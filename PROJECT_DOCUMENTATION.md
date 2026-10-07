@@ -66,6 +66,7 @@ traffic/
 │   ├── simulation.py            # tick, green/yellow, emergency timing, service times
 │   ├── traffic_profiles.py      # the 5 scenarios
 │   ├── density.py               # Density controller parameters
+│   ├── perception.py            # long-wait threshold, simulated camera-error rates
 │   └── rl.py                    # RL environment, agents, training, validation
 ├── scheduler/traffic_scheduler.py
 ├── strategies/                  # base_strategy, fixed_timer, density, rl_strategy
@@ -73,6 +74,7 @@ traffic/
 ├── traffic_source/              # profile_traffic_source (used), random, yolo/sumo placeholders
 ├── services/service_model.py
 ├── analytics/                   # statistics.py (KPIs), logger.py (per-tick CSV)
+├── perception/                  # observation.py (per-lane contract), simulated.py (exact / noisy)
 ├── env/                         # traffic_env.py (Gym-style env), state_builder.py
 ├── rl/                          # agents.py (tabular Q), dqn.py (numpy DQN), train.py
 ├── evaluation/evaluate.py       # quick side-by-side strategy comparison
@@ -241,7 +243,7 @@ Implemented in `analytics/statistics.py`.
 ### 9.1 Environment (`env/traffic_env.py`)
 
 ```
-reset()        -> 23-dim observation at the first decision point
+reset()        -> 75-dim observation at the first decision point
 step(action)   -> (next_obs, reward, done, info)      action in 0..9
 info           -> {"duration": seconds the step lasted, "truncated": bool}
 ```
@@ -252,18 +254,23 @@ pauses mid-tick at that moment, hands the observation to the agent, and resumes 
 tick with the chosen action, so no simulated time is spent waiting, and the reward
 returned by `step(a)` covers exactly the time `a` was in control.
 
-**Observation** (built by one function for both training and inference, so the two can't differ):
+**Observation** (built by one function for both training and inference, so the two can't
+differ). The agent never reads the simulator directly: it receives a **perception**
+summary (§9.6) and turns it into 75 numbers:
 
 | Index | Feature |
 |---|---|
-| 0–3 | Queue per approach ÷ 50 |
-| 4–7 | Rank per approach, scaled to 0–1 |
-| 8–11 | Longest current wait per approach ÷ 60 s (capped at 3), the starvation signal |
-| 12–21 | Active phase, one-hot |
-| 22 | Elapsed green of the active phase ÷ 40 s |
+| 0–63 | For each of the 16 lanes: count ÷ 10, mean wait ÷ 60 s, longest wait ÷ 60 s (waits capped at 3), number of vehicles waiting > 60 s ÷ 10 |
+| 64–73 | Active phase, one-hot |
+| 74 | Elapsed green of the active phase ÷ 40 s |
 
-**Reward:** −(Σ over the step's ticks of total queue × 0.5 s) ÷ 100, i.e. the queueing
-delay in vehicle-seconds, scaled. The scale matters more than it looks; see §9.5.
+The long-waiter count makes "1 vehicle waiting 150 s" and "10 vehicles waiting 150 s"
+different states, and lane resolution matches what a phase actually serves.
+
+**Reward:** each queued vehicle costs, per second, `1 + max(0, wait − 60 s) / 30 s`: 1/s up
+to a 60 s wait, then 3/s at 120 s and 5/s at 180 s. The step's reward is −(total cost) ÷ 100.
+Because the cost is summed over vehicles, ten long-waiting vehicles cost ten times one,
+and a long-waiting group gradually outweighs a larger group of fresh arrivals (§9.7).
 
 **Episodes:** 1,200 ticks (10 min). The end of an episode is a **truncation**, not a
 terminal state, so learners still bootstrap from the final state.
@@ -283,7 +290,7 @@ These are the same 10 / +5 / 40 s bounds Density uses. Steps therefore last 5 s 
 - **Tabular Q-learning** (`rl/agents.py`): state = queue LOW/MED/HIGH per approach
   (< 5, 5–19, ≥ 20) × active phase × elapsed-green level (< 15 s, 15–35 s, cap) =
   **2,430 states**; Q-table (2430, 10).
-- **DQN** (`rl/dqn.py`), all numpy: MLP 23 → 64 → 64 → 10 (ReLU), Adam optimiser,
+- **DQN** (`rl/dqn.py`), all numpy: MLP 75 → 64 → 64 → 10 (ReLU), Adam optimiser,
   experience replay (20k), target network (synced every 200 updates), **Double-DQN**
   targets, **Huber loss**, gradient-norm clipping (10). The backprop is checked
   against finite differences in the tests.
@@ -317,6 +324,34 @@ Chosen on the validation seeds (5 variants tried, test set untouched until the f
 (h(Q) = sign(Q)(√(|Q|+1) − 1) + εQ, as in R2D2) is implemented and tested but off
 (`DQN_VALUE_RESCALING`), since it didn't help here.
 
+### 9.6 Perception: what the controller sees (`perception/`)
+`IntersectionObservation` holds, for each lane, the wait of every visible queued vehicle.
+That's what a camera can measure: detection gives the vehicles in each lane region, and
+tracking gives how long each has been stopped. Two sources exist today:
+
+- `GroundTruthPerception`: exact queues from the simulator (used for training).
+- `NoisyPerception`: simulated camera errors. 5% missed vehicles, a 2% chance of a
+  phantom detection per lane, only the first 15 vehicles of each lane visible, ±10%
+  wait-estimate error, 5% lost-and-re-acquired tracks (wait underestimated). These rates
+  are **assumptions** in `config/perception.py`, to be calibrated on real footage.
+
+A future camera pipeline implements the same `observe()` contract; the controller doesn't change.
+The reward still uses true waits, because it's only needed in training, in simulation.
+
+### 9.7 Fairness: weighing how many vehicles wait, and for how long
+With a plain total-delay reward, one vehicle waiting 180 s costs the same as 36 vehicles
+waiting 5 s each, so the agent occasionally left a lone vehicle waiting minutes on a quiet
+junction (longest night wait 165 s vs Density's 78 s). The wait-aware reward and the
+long-waiter features fix that. Chosen on validation seeds with a selection rule written
+down before any variant was run (slopes 60 / 30 / 15 s and a features-only variant
+compared; slope 30 s chosen). On the test seeds, the longest night wait fell to 77 s.
+
+**Optional maximum-red safety rule** (`RLStrategy(max_red=...)`): if a lane with vehicles has
+been red longer than the limit, the agent is overridden with the phase that serves the
+most vehicles in such lanes, like a real controller's max-red setting. It lowers
+worst-case waits further but costs average delay (90 s: max wait 130 → 117 s, average
+18.7 → 20.2 s), so it's off by default and offered as a deployment setting.
+
 ---
 
 ## 10. Experiment Methodology
@@ -345,15 +380,17 @@ about 3 min on 12 cores; `--use-saved` re-evaluates in about 10 s and reproduces
 
 Current numbers: [results/model_cards.md](results/model_cards.md). What they show:
 
-- **DQN is the best controller overall**: about 32% less average delay than Density, with a
-  95% CI that excludes zero, plus shorter queues, higher throughput, a better 95th-percentile
-  wait, and half the ambulance delay (fewer vehicles queued ahead of the ambulance). It is
-  very consistent across training seeds (± 0.2 s).
-- **It wins or ties in every scenario**: the largest gains are in rush hour and on the custom
-  day, it's slightly ahead in light and normal traffic, and tied at night.
-- **Its worst-case (max) delay is longer than Density's.** The reward is total delay, which
-  doesn't specifically penalise making one vehicle wait a long time; Density's
-  phase-rotation bonus does.
+- **DQN is the best controller overall**: about 30% less average delay than Density (95% CI
+  excludes zero), plus a **shorter worst-case wait**, a 26% better 95th-percentile wait,
+  shorter queues, higher throughput and lower ambulance delay (fewer vehicles queued ahead
+  of the ambulance).
+- **By scenario**: large gains in rush hour and on the custom day, ahead in normal and night
+  traffic, slightly behind Density in light traffic.
+- **Robust to camera errors**: with simulated detection and tracking errors, average delay
+  rises only ~3% (18.7 → 19.2 s).
+- **The fairness trade-off is explicit.** The wait-aware reward cost ~0.7 s of average delay
+  versus the pure total-delay reward, in exchange for a much shorter worst-case wait; the
+  optional max-red rule trades further along the same curve.
 - **Tabular Q-learning is behind Fixed Timer.** Its coarse LOW/MED/HIGH state can't tell
   "busy" from "gridlocked", which is the motivation for the DQN. It is also sensitive to
   tiny perturbations: a 1e-16 rounding difference flipping one tied `argmax` late in
@@ -366,7 +403,7 @@ Current numbers: [results/model_cards.md](results/model_cards.md). What they sho
 
 ## 12. Testing
 
-`python -m pytest` runs 69 tests (~40 s), also in CI on every push and pull request.
+`python -m pytest` runs 76 tests (~40 s), also in CI on every push and pull request.
 
 | Area | Examples |
 |---|---|
@@ -375,6 +412,7 @@ Current numbers: [results/model_cards.md](results/model_cards.md). What they sho
 | Emergency | Clearance → emergency green → resume; fail-safe + cooldown |
 | Discharge & metrics | Per-type service times; KPI definitions; delay including queued vehicles |
 | RL environment | Reward credited to the right action; training/inference features identical; durations; truncation |
+| Perception & fairness | Exact and noisy perception; per-lane features tell 1 long-waiter from 10; wait-aware reward maths; max-red override |
 | Learning code | Q-update maths; finite-difference gradient check; Adam; DQN learns a bandit |
 | Regression | Exact golden KPIs for Fixed Timer and Density; end-to-end harness in quick mode |
 
@@ -421,8 +459,9 @@ print_comparison(evaluate_strategies({"fixed_timer": FixedTimerStrategy(),
 
 ## 15. Known Limitations
 
-- **Worst-case delay**: the DQN's maximum delay is longer than Density's; the delay-based
-  reward doesn't penalise long individual waits (a fairness term is the natural next step).
+- **Simulated cameras only**: the perception contract and the error model exist, but the
+  camera pipeline (detection + tracking) and error rates measured on real footage don't yet.
+- **Light traffic**: the DQN is slightly behind Density there (13.2 vs 11.8 s).
 - **RUSH_HOUR** is over capacity, with frequent ambulances (§4).
 - **No conflict-matrix test**: the phase plan is pinned to the official diagrams, but
   movement compatibility isn't independently verified (no authoritative conflict table in the code).

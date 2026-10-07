@@ -18,15 +18,16 @@ regular Simulation class, but:
     action that caused it.
 
 Contract:
-  reset()              -> observation (23-dim) at the first decision point
+  reset()              -> observation (OBS_DIM floats) at the first decision point
   step(action)         -> (next_obs, reward, done, info)
   discrete_state       -> tabular bucket for the current decision point
   action_space         -> n = 10 (choose one normal phase)
-  observation_space    -> shape = (23,)
+  observation_space    -> shape = (OBS_DIM,)
 
-Reward: r = -(queueing delay during the step) / REWARD_SCALE, where the
-delay is sum over ticks of (total queue * tick seconds) = vehicle-seconds
-spent waiting. Minimizing it minimizes total delay.
+Reward: r = -(wait-weighted queueing delay during the step) / REWARD_SCALE.
+Each queued vehicle costs 1 per second, plus an extra amount that grows
+with how long it has already waited (see config.rl WAIT_PENALTY_*). With
+the penalty off this is total vehicle-seconds of delay.
 
 Episodes end on a time limit only. Traffic never "finishes", so the final
 step is a truncation, not a terminal state: info["truncated"] is True and
@@ -45,6 +46,8 @@ from traffic_source.profile_traffic_source import ProfileTrafficSource
 from services.service_model import ServiceModel
 from strategies.rl_strategy import RLStrategy
 
+_DEFAULT = object()
+
 
 class TrafficRLEnv:
     """
@@ -55,6 +58,10 @@ class TrafficRLEnv:
         episode_length (int): number of simulation ticks per episode.
         seed (int|None): base seed for the traffic source.
         tick_interval (float): seconds per simulated tick.
+        wait_penalty_slope (float|None): wait-aware reward slope (None = off;
+            default from config).
+        perception_factory (callable|None): seed -> perception source for the
+            agent's observations (default: ground truth).
     """
 
     def __init__(
@@ -63,6 +70,8 @@ class TrafficRLEnv:
         episode_length=None,
         seed=None,
         tick_interval=None,
+        wait_penalty_slope=_DEFAULT,
+        perception_factory=None,
     ):
         self.profile_key = profile_key
         self.episode_length = (
@@ -77,9 +86,16 @@ class TrafficRLEnv:
             else sim_config.TICK_DURATION
         )
 
+        self.wait_penalty_threshold = rl_config.WAIT_PENALTY_THRESHOLD
+        self.wait_penalty_slope = (
+            rl_config.WAIT_PENALTY_SLOPE if wait_penalty_slope is _DEFAULT
+            else wait_penalty_slope
+        )
+        self.perception_factory = perception_factory
+
         self.phase_types = all_phase_types()
         self.action_space = len(self.phase_types)  # 10 discrete actions
-        self.observation_space = (23,)
+        self.observation_space = (rl_config.OBS_DIM,)
 
         # Runtime state (rebuilt each reset).
         self.intersection = None
@@ -105,7 +121,9 @@ class TrafficRLEnv:
 
         # Fresh world.
         self.intersection = Intersection()
-        self.strategy = RLStrategy()
+        perception = (self.perception_factory(self.seed)
+                      if self.perception_factory is not None else None)
+        self.strategy = RLStrategy(perception=perception)
         self.scheduler = TrafficScheduler(
             self.intersection,
             self.strategy,
@@ -206,9 +224,24 @@ class TrafficRLEnv:
         return self._tick_reward()
 
     def _tick_reward(self) -> float:
-        """Per-tick reward: -(vehicle-seconds queued this tick), scaled."""
-        delay = self.intersection.total_queue_length() * self.tick_interval
-        return -delay / rl_config.REWARD_SCALE
+        """
+        Per-tick reward: -(wait-weighted vehicle-seconds this tick), scaled.
+
+        Every queued vehicle costs 1 per second, plus (if the wait penalty
+        is on) an extra (wait - threshold) / slope once it has waited longer
+        than the threshold. Uses true waits: the reward is only needed in
+        training, where the simulator knows them exactly.
+        """
+        cost = float(self.intersection.total_queue_length())
+        slope = self.wait_penalty_slope
+        if slope:
+            threshold = self.wait_penalty_threshold
+            for lane in self.intersection.all_lanes():
+                for vehicle in lane.queue:           # FIFO: waits decrease
+                    if vehicle.waiting_time <= threshold:
+                        break
+                    cost += (vehicle.waiting_time - threshold) / slope
+        return -cost * self.tick_interval / rl_config.REWARD_SCALE
 
     # ------------------------------------------------------------------
     # Discrete state (for tabular Q)

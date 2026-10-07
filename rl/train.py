@@ -8,7 +8,7 @@ Stage 1: train_tabular
 
 Stage 2: train_dqn
     Runs DQNAgent (pure-numpy MLP) against the SAME environment, but over
-    the RAW 23-dim observation (no discretization).
+    the RAW observation vector (no discretization).
 
 Both share one loop (_train), so they see identical episodes:
     - Episode = one fixed-length window (EPISODE_LENGTH ticks) of a profile.
@@ -42,7 +42,7 @@ def epsilon_at(episode, n_episodes):
     )
 
 
-def validate(agent, profiles=None, seeds=None, ticks=None):
+def validate(agent, profiles=None, seeds=None, ticks=None, perception_factory=None):
     """
     Score the greedy policy on held-out seeds (no exploration, no learning).
 
@@ -54,7 +54,10 @@ def validate(agent, profiles=None, seeds=None, ticks=None):
     """
     from strategies.rl_strategy import RLStrategy
 
-    return score_policy(lambda: RLStrategy(agent=agent), profiles, seeds, ticks)
+    def make():
+        perception = perception_factory(0) if perception_factory is not None else None
+        return RLStrategy(agent=agent, perception=perception)
+    return score_policy(make, profiles, seeds, ticks)
 
 
 def score_policy(strategy_factory, profiles=None, seeds=None, ticks=None):
@@ -83,7 +86,8 @@ def score_policy(strategy_factory, profiles=None, seeds=None, ticks=None):
     return sum(waits) / len(waits)
 
 
-def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verbose):
+def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verbose,
+           perception_factory=None):
     """
     Shared episode loop.
 
@@ -98,7 +102,7 @@ def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verb
     best = {"wait": float("inf"), "episode": 0, "weights": None}
 
     def checkpoint(ep):
-        wait = validate(agent)
+        wait = validate(agent, perception_factory=perception_factory)
         history["validation"].append((ep, wait))
         if wait < best["wait"]:
             best.update(wait=wait, episode=ep, weights=agent.get_weights())
@@ -114,6 +118,7 @@ def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verb
             profile_key=profile_key,
             episode_length=episode_length,
             seed=seed + ep,
+            perception_factory=perception_factory,
         )
         obs = env.reset()
         state = env.discrete_state if use_discrete else obs
@@ -157,6 +162,7 @@ def train_tabular(
     episode_length=None,
     seed=None,
     verbose=True,
+    perception_factory=None,
 ):
     """
     Train a TabularQAgent.
@@ -176,6 +182,7 @@ def train_tabular(
         episode_length=episode_length if episode_length is not None else rl_config.EPISODE_LENGTH,
         seed=seed,
         verbose=verbose,
+        perception_factory=perception_factory,
     )
     return agent, history
 
@@ -187,9 +194,10 @@ def train_dqn(
     episode_length=None,
     seed=None,
     verbose=True,
+    perception_factory=None,
 ):
     """
-    Train a DQNAgent over the raw 23-dim observation.
+    Train a DQNAgent over the raw observation vector.
 
     Returns:
         (DQNAgent, dict): trained agent and training history (see _train).
@@ -209,5 +217,6 @@ def train_dqn(
         episode_length=episode_length if episode_length is not None else rl_config.EPISODE_LENGTH,
         seed=seed,
         verbose=verbose,
+        perception_factory=perception_factory,
     )
     return agent, history

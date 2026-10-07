@@ -48,11 +48,20 @@ PROFILES = ("LIGHT_TRAFFIC", "NORMAL_TRAFFIC", "RUSH_HOUR", "NIGHT", "CUSTOM")
 # gradients stay capped by the Huber loss. (10 was indistinguishable from 100.)
 REWARD_SCALE = 100.0
 
-# Observation vector (23-dim).
-QUEUE_NORM = 50.0
-WAIT_NORM = 60.0          # seconds; longest-wait (starvation) feature scale
+# Wait-aware reward. Each queued vehicle costs, per second,
+#     1 + max(0, wait - WAIT_PENALTY_THRESHOLD) / WAIT_PENALTY_SLOPE
+# so a vehicle's cost grows the longer IT has waited, and because the cost
+# is summed over vehicles, 10 long-waiters cost 10x one long-waiter.
+# Example (threshold 60 s, slope 30 s): 1/s at 60 s, 3/s at 120 s, 5/s at 180 s.
+# WAIT_PENALTY_SLOPE = None disables it (every waiting second costs 1).
+WAIT_PENALTY_THRESHOLD = 60.0
+WAIT_PENALTY_SLOPE = 30.0           # chosen on validation (Step 8), see dev_notes
+
+# Observation vector (75-dim): 16 lanes x 4 features + 10 phase one-hot + 1.
+LANE_QUEUE_NORM = 10.0     # vehicles; per-lane count and long-waiter scale
+WAIT_NORM = 60.0           # seconds; mean / longest wait feature scale
 MAX_GREEN_NORM = 40.0      # elapsed-green feature scale (= MAX_GREEN)
-OBS_DIM = 23
+OBS_DIM = 75
 
 # Tabular Q discretization.
 LOW_THRESHOLD = 5
