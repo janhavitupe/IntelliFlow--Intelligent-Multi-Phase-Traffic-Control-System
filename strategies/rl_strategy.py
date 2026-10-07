@@ -41,10 +41,20 @@ or simulated camera errors (NoisyPerception). It also keeps the
 decision-time bookkeeping it needs: when the current phase's green started
 (elapsed-in-phase) and when each lane was last green (for the safety rule).
 
-Safety rule (optional, `max_red`): if a lane with visible vehicles has been
-red for longer than `max_red` seconds, the agent's choice is overridden with
-the phase that serves the most vehicles in such starved lanes. Like a real
-controller's maximum-red limit, it bounds waits even if the policy errs.
+Safety envelope (rule-based, around the learned policy; deployment only:
+the training env turns it off so the agent is credited only for its own
+actions):
+  - Sensor-failure fallback: if the perception source reports it is down
+    (observation.available is False), the agent is bypassed and phases
+    rotate in fixed order, like a real controller on detector failure.
+  - No empty green (`serve_waiting`, on by default): if the agent picks a
+    phase that serves no visible vehicle while vehicles wait elsewhere, the
+    phase with the most accumulated waiting (sum of the waits of the
+    vehicles it would serve) is used instead.
+  - Maximum red (optional, `max_red`): if a lane with visible vehicles has
+    been red for longer than `max_red` seconds, the agent's choice is
+    overridden with the phase that serves the most vehicles in such starved
+    lanes. It bounds waits even where the policy errs.
 
 NOTE ON IMPORTS: This module imports env.state_builder lazily (inside reset)
 to avoid a circular-import cycle (env.traffic_env imports RLStrategy from
@@ -60,6 +70,7 @@ from config.phases import all_phase_types
 from perception import LANE_ORDER, GroundTruthPerception
 
 APPROACH_ORDER = ("North", "South", "East", "West")
+_CONFIG = object()   # "use the configured safety default"
 
 
 class RLStrategy(BaseStrategy):
@@ -85,14 +96,16 @@ class RLStrategy(BaseStrategy):
     """
 
     def __init__(self, agent=None, min_green=None, extension=None, max_green=None,
-                 perception=None, max_red=None):
+                 perception=None, max_red=_CONFIG, serve_waiting=_CONFIG):
         super().__init__(name="rl")
         self.agent = agent
         self.min_green = min_green if min_green is not None else rl_config.MIN_GREEN
         self.extension = extension if extension is not None else rl_config.GREEN_EXTENSION
         self.max_green = max_green if max_green is not None else rl_config.MAX_GREEN
         self.perception = perception if perception is not None else GroundTruthPerception()
-        self.max_red = max_red
+        self.max_red = rl_config.SAFETY_MAX_RED if max_red is _CONFIG else max_red
+        self.serve_waiting = (rl_config.SAFETY_SERVE_WAITING if serve_waiting is _CONFIG
+                              else serve_waiting)
         self._phases = all_phase_types()
         self._phase_lanes = None
         self.reset()
@@ -122,6 +135,8 @@ class RLStrategy(BaseStrategy):
         self._last_green = {lane: 0.0 for lane in LANE_ORDER}
         self.decisions = 0
         self.shield_overrides = 0
+        self.empty_green_overrides = 0
+        self.fallback_decisions = 0
 
     # ------------------------------------------------------------------
     # Decision-time features
@@ -161,6 +176,11 @@ class RLStrategy(BaseStrategy):
             self.awaiting_action = False
         else:
             obs, state = self.observe(intersection, current_phase, time)
+            if not self.last_observation.available:
+                # Sensor down: bypass the agent, rotate phases in fixed order.
+                self.decisions += 1
+                self.fallback_decisions += 1
+                return self._fallback_action(current_phase)
             if self.agent is None:
                 self.awaiting_action = True
                 return HOLD
@@ -171,14 +191,17 @@ class RLStrategy(BaseStrategy):
         self.decisions += 1
         return self._shield(action, intersection, time)
 
+    def _fallback_action(self, current_phase):
+        """Fixed-order rotation: the phase after the current one."""
+        if current_phase is None or current_phase.phase_type not in self._phases:
+            self._fallback_next = getattr(self, "_fallback_next", -1) + 1
+            return self._fallback_next % len(self._phases)
+        return (self._phases.index(current_phase.phase_type) + 1) % len(self._phases)
+
     def _shield(self, action, intersection, time):
-        """Maximum-red safety rule: serve lanes that have waited too long."""
-        if self.max_red is None or self.last_observation is None:
-            return action
-        starved = {lane.movement_id: lane.count for lane in self.last_observation.lanes
-                   if lane.count > 0
-                   and time - self._last_green[lane.movement_id] > self.max_red}
-        if not starved:
+        """Safety envelope: maximum red first, then no empty green."""
+        obs = self.last_observation
+        if obs is None or not obs.available:
             return action
         if self._phase_lanes is None:
             from config.phases import build_phase_plan
@@ -186,12 +209,27 @@ class RLStrategy(BaseStrategy):
                 {m.movement_id for m in build_phase_plan(intersection)[pt].movements}
                 for pt in self._phases
             ]
-        served = [sum(n for lane, n in starved.items() if lane in lanes)
-                  for lanes in self._phase_lanes]
-        best = max(range(len(served)), key=lambda i: served[i])
-        if best != action:
-            self.shield_overrides += 1
-        return best
+
+        if self.max_red is not None:
+            starved = {lane.movement_id: lane.count for lane in obs.lanes
+                       if lane.count > 0
+                       and time - self._last_green[lane.movement_id] > self.max_red}
+            if starved:
+                served = [sum(n for lane, n in starved.items() if lane in lanes)
+                          for lanes in self._phase_lanes]
+                best = max(range(len(served)), key=lambda i: served[i])
+                if best != action:
+                    self.shield_overrides += 1
+                return best
+
+        if self.serve_waiting:
+            waiting = {lane.movement_id: sum(lane.waits) for lane in obs.lanes if lane.count > 0}
+            if waiting and not any(lane in self._phase_lanes[action] for lane in waiting):
+                totals = [sum(w for lane, w in waiting.items() if lane in lanes)
+                          for lanes in self._phase_lanes]
+                self.empty_green_overrides += 1
+                return max(range(len(totals)), key=lambda i: totals[i])
+        return action
 
     # ------------------------------------------------------------------
     # BaseStrategy interface (called by the scheduler)

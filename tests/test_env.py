@@ -150,7 +150,9 @@ def test_training_and_inference_compute_identical_observations():
             break
         env_obs.append(obs)
 
-    strategy = RLStrategy(agent=_ReplayAgent(actions))
+    # Same policy on both sides: the deployment safety envelope would override
+    # some replayed actions, so it is off here (training never uses it).
+    strategy = RLStrategy(agent=_ReplayAgent(actions), max_red=None, serve_waiting=False)
     sim_obs = []
     original = strategy.observe
 

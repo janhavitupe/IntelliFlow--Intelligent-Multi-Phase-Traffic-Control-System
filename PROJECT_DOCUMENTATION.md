@@ -346,11 +346,21 @@ long-waiter features fix that. Chosen on validation seeds with a selection rule 
 down before any variant was run (slopes 60 / 30 / 15 s and a features-only variant
 compared; slope 30 s chosen). On the test seeds, the longest night wait fell to 77 s.
 
-**Optional maximum-red safety rule** (`RLStrategy(max_red=...)`): if a lane with vehicles has
-been red longer than the limit, the agent is overridden with the phase that serves the
-most vehicles in such lanes, like a real controller's max-red setting. It lowers
-worst-case waits further but costs average delay (90 s: max wait 130 → 117 s, average
-18.7 → 20.2 s), so it's off by default and offered as a deployment setting.
+### 9.8 Safety envelope (deployment only)
+The learned policy runs inside three rules, like the safety logic around any real adaptive
+controller. They are applied only when the controller is deployed; the training env turns
+them off, so the agent is only ever credited for its own actions.
+
+| Rule | What it does |
+|---|---|
+| No empty green | If the agent picks a phase that serves no visible vehicle while vehicles wait elsewhere, the phase with the most accumulated waiting (sum of the waits of the vehicles it would serve) is used instead |
+| Maximum red, 90 s | A lane with vehicles that has been red for 90 s is served next (the phase covering the most such vehicles) |
+| Camera-failure fallback | If perception reports the sensor down (`available=False`), phases rotate in fixed order until it recovers |
+
+They were chosen on the edge-case stress test (§10.1) with a rule written down in advance. The
+raw policy, for comparison: a lone car at an empty junction waited 332 s; with the envelope,
+14 s. The envelope also improves the standard benchmark (average delay 18.7 → 18.5 s,
+longest wait 130 → 105 s, light traffic 13.2 → 5.7 s), at a small cost in throughput.
 
 ---
 
@@ -374,23 +384,45 @@ Outputs: `results/results_table.csv` (one row per run), `results/model_cards.md`
 `images/G1–G4`, `models/` (per-seed agents + `training_history.json`). A full run takes
 about 3 min on 12 cores; `--use-saved` re-evaluates in about 10 s and reproduces the outputs exactly.
 
+### 10.1 Edge-case stress test (`evaluation/stress_test.py`)
+Twelve hand-built scenarios (`ScenarioTrafficSource` combines random arrivals with
+scripted events): empty junction, one car per lane at night, a flooded lane, main road vs
+side road, 400 cars at once, a surge, all trucks, simultaneous ambulances on all
+approaches, an ambulance behind a 30-car queue, an ambulance every 20 s, demand 30% above
+capacity, a camera outage. Every controller runs every scenario (the DQN once per training
+seed; the report shows the worst seed). An `InvariantMonitor` checks on every tick:
+
+- **I1** only the active phase's movements are green; nothing green during yellow
+- **I2** no switch away from a green phase without yellow
+- **I3** every normal green lasts 10–40 s (unless an ambulance preempts it)
+- **I4** spawned = served + queued
+- **I5** every ambulance that arrived at least 60 s before the end was served
+
+Result: 0 violations for every controller. A test plants a wrong green and checks that the
+monitor catches it. Report: `results/stress_test.md`.
+
+### 10.2 Simulation viewer (`visualize.py`, `viewer/template.html`)
+Records Fixed Timer, Density and the deployed DQN on all 17 scenarios (one frame per
+simulated second, from the real simulator) and writes a self-contained HTML replay:
+synchronised junction views, live stats, a queue chart and an end-of-run table.
+
 ---
 
 ## 11. Results Summary
 
 Current numbers: [results/model_cards.md](results/model_cards.md). What they show:
 
-- **DQN is the best controller overall**: about 30% less average delay than Density (95% CI
-  excludes zero), plus a **shorter worst-case wait**, a 26% better 95th-percentile wait,
-  shorter queues, higher throughput and lower ambulance delay (fewer vehicles queued ahead
-  of the ambulance).
-- **By scenario**: large gains in rush hour and on the custom day, ahead in normal and night
-  traffic, slightly behind Density in light traffic.
+- **The deployed DQN is the best controller overall**: about 30% less average delay than
+  Density (−8.0 s, 95% CI [−10.5, −5.8]), a shorter worst-case wait (105 vs 142 s), a better
+  95th-percentile wait, shorter queues and lower ambulance delay. It wins in all five
+  standard profiles.
+- **Edge cases**: lowest average delay in 11 of 12; worst-case wait above both baselines in
+  three (simultaneous ambulances, demand beyond capacity, camera outage). Safety invariants:
+  0 violations.
 - **Robust to camera errors**: with simulated detection and tracking errors, average delay
-  rises only ~3% (18.7 → 19.2 s).
-- **The fairness trade-off is explicit.** The wait-aware reward cost ~0.7 s of average delay
-  versus the pure total-delay reward, in exchange for a much shorter worst-case wait; the
-  optional max-red rule trades further along the same curve.
+  rises about 2% (18.5 → 18.8 s).
+- **The fairness trade-off is explicit**: the wait-aware reward and the safety envelope
+  shorten the longest waits at a small cost in throughput.
 - **Tabular Q-learning is behind Fixed Timer.** Its coarse LOW/MED/HIGH state can't tell
   "busy" from "gridlocked", which is the motivation for the DQN. It is also sensitive to
   tiny perturbations: a 1e-16 rounding difference flipping one tied `argmax` late in
@@ -403,7 +435,7 @@ Current numbers: [results/model_cards.md](results/model_cards.md). What they sho
 
 ## 12. Testing
 
-`python -m pytest` runs 76 tests (~40 s), also in CI on every push and pull request.
+`python -m pytest` runs 88 tests (~40 s), also in CI on every push and pull request.
 
 | Area | Examples |
 |---|---|
@@ -412,7 +444,8 @@ Current numbers: [results/model_cards.md](results/model_cards.md). What they sho
 | Emergency | Clearance → emergency green → resume; fail-safe + cooldown |
 | Discharge & metrics | Per-type service times; KPI definitions; delay including queued vehicles |
 | RL environment | Reward credited to the right action; training/inference features identical; durations; truncation |
-| Perception & fairness | Exact and noisy perception; per-lane features tell 1 long-waiter from 10; wait-aware reward maths; max-red override |
+| Perception & fairness | Exact and noisy perception; per-lane features tell 1 long-waiter from 10; wait-aware reward maths |
+| Safety envelope & edge cases | Max-red override; no empty green; camera-failure fallback; envelope off in training; invariant monitor catches a planted wrong green; rule-based controllers hold all invariants; deployed DQN serves lone cars in < 60 s |
 | Learning code | Q-update maths; finite-difference gradient check; Adam; DQN learns a bandit |
 | Regression | Exact golden KPIs for Fixed Timer and Density; end-to-end harness in quick mode |
 
@@ -425,6 +458,8 @@ pip install -r requirements.txt
 python main.py                          # live console simulation
 python run_experiments.py               # full experiment (~3 min)
 python run_experiments.py --use-saved   # re-evaluate saved models (~10 s)
+python visualize.py                     # simulation viewer (opens in the browser)
+python -m evaluation.stress_test        # edge cases + safety invariants
 python plot_rewards.py [n_episodes]     # quick tabular-Q training run + reward plot
 python -m pytest                        # tests
 ```
@@ -461,7 +496,10 @@ print_comparison(evaluate_strategies({"fixed_timer": FixedTimerStrategy(),
 
 - **Simulated cameras only**: the perception contract and the error model exist, but the
   camera pipeline (detection + tracking) and error rates measured on real footage don't yet.
-- **Light traffic**: the DQN is slightly behind Density there (13.2 vs 11.8 s).
+- **Not provably optimal**: no controller can be. Safety properties are rule-enforced and
+  checked; performance is measured on the standard benchmark and the edge cases.
+- **Worst-case waits in three edge cases** (simultaneous ambulances on all approaches,
+  demand beyond capacity, camera outage) are 4–46 s longer than the best baseline's.
 - **RUSH_HOUR** is over capacity, with frequent ambulances (§4).
 - **No conflict-matrix test**: the phase plan is pinned to the official diagrams, but
   movement compatibility isn't independently verified (no authoritative conflict table in the code).

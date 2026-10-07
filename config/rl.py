@@ -93,6 +93,11 @@ DQN_GRAD_CLIP = 10.0         # max global gradient norm per update
 # 1000 it traded light-traffic gains for rush/night losses; combined with a
 # larger reward it was worse than the larger reward alone.
 DQN_VALUE_RESCALING = False
+
+# Safety envelope used at deployment (never during training; see RLStrategy).
+# Chosen in Step 9 on the edge-case stress test (evaluation/stress_test.py).
+SAFETY_MAX_RED = 90.0          # seconds a lane with vehicles may stay red
+SAFETY_SERVE_WAITING = True    # never give green to an empty phase while others wait
 DQN_VALUE_RESCALING_EPS = 1e-2
 
 # ---------------------------------------------------------------------------

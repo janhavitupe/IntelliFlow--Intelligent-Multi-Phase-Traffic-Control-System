@@ -46,6 +46,9 @@ class Simulation:
         log_to_csv (bool): record per-tick snapshots via CsvLogger.
         strategy_key (str): "fixed_timer" (default) or "density" (Phase 3
             percentile-based adaptive density controller).
+        strategy: an explicit strategy object (overrides strategy_key).
+        traffic_source: an explicit traffic source (overrides profile_key),
+            e.g. a scripted ScenarioTrafficSource.
     """
 
     def __init__(
@@ -60,6 +63,7 @@ class Simulation:
         log_to_csv: bool = False,
         strategy_key: str = None,
         strategy=None,
+        traffic_source=None,
     ):
         # Resolve defaults from central config module.
         self.tick_interval = tick_interval if tick_interval is not None else sim_config.TICK_DURATION
@@ -98,7 +102,7 @@ class Simulation:
         self.service_model = ServiceModel()
 
         # Pluggable traffic source.
-        self.traffic_source = ProfileTrafficSource(
+        self.traffic_source = traffic_source or ProfileTrafficSource(
             profile_key=profile_key,
             seed=seed,
             tick_duration=self.tick_interval,

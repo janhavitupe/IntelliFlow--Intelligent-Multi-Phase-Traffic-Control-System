@@ -6,7 +6,7 @@ waits (see observation.py). Simulated sources live in simulated.py; a camera
 pipeline will implement the same contract in the visual-input phase.
 """
 from .observation import LANE_ORDER, IntersectionObservation, LaneObservation
-from .simulated import GroundTruthPerception, NoisyPerception
+from .simulated import BlackoutPerception, GroundTruthPerception, NoisyPerception
 
 __all__ = ["LANE_ORDER", "IntersectionObservation", "LaneObservation",
-           "GroundTruthPerception", "NoisyPerception"]
+           "BlackoutPerception", "GroundTruthPerception", "NoisyPerception"]

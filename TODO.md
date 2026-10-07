@@ -18,7 +18,7 @@
 ### Evaluation and quality
 - [x] Per-vehicle delay metrics (avg / P95 / max / ambulance)
 - [x] Experiment harness: 10-min runs × 5 profiles × 5 test seeds; RL trained from 3 seeds in parallel; per-profile results; bootstrap CI
-- [x] pytest suite (76 tests) with golden KPIs, gradient check and harness smoke test; CI on GitHub Actions
+- [x] pytest suite (88 tests) with golden KPIs, gradient check and harness smoke test; CI on GitHub Actions
 - [x] Documentation refresh (README, PROJECT_DOCUMENTATION, TODO, model card, docstrings)
 
 ## Next
@@ -28,6 +28,9 @@
       slightly behind Density in light traffic only (13.2 vs 11.8 s).
 - [x] **DQN worst-case delay.** Wait-aware reward + per-lane long-waiter features (Step 8);
       the DQN's longest wait is now shorter than Density's. Optional max-red safety rule added.
+- [x] **Edge-case stress test + safety envelope + simulation viewer** (Step 9).
+- [ ] **Remaining edge-case tails**: simultaneous ambulances on all approaches, demand beyond
+      capacity, camera outage (worst waits 4–46 s above the best baseline).
 - [ ] **Visual input phase.** Camera pipeline (YOLO detection + tracking such as ByteTrack,
       lane regions per camera) implementing `perception.observe()`; calibrate
       `config/perception.py` error rates on real footage; re-test noise-aware training.
@@ -41,6 +44,6 @@
 
 ## Future integrations
 - [ ] SUMO integration (`traffic_source/sumo_generator.py`)
-- [ ] Web dashboard
+- [ ] Live (interactive) dashboard on top of the recorded viewer
 - [ ] Database logging
 - [ ] Queue-relaxation strategy (`strategies/queue_relaxation_strategy.py`)

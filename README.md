@@ -21,17 +21,49 @@ Full tables, per-scenario breakdowns and confidence intervals:
 |---|---|---|---|---|---|
 | Fixed Timer | 31.0 s | 178 s | 71.2 | 1.224 veh/s | 15.6 s |
 | Density (rule-based) | 26.6 s | 142 s | 61.8 | 1.250 veh/s | 13.1 s |
-| Q-Learning | 34.3 ± 2.1 s | 224 s | 71.2 | 1.238 veh/s | 14.8 s |
-| **DQN** | **18.7 ± 1.6 s** | **130 s** | **39.5** | **1.324 veh/s** | **8.3 s** |
+| Q-Learning | 25.3 ± 1.8 s | 130 s | 62.6 | 1.262 veh/s | 13.8 s |
+| **DQN** | **18.5 ± 0.7 s** | **105 s** | **45.6** | **1.300 veh/s** | **9.5 s** |
 
 **In short:** the DQN cuts average delay by 30% versus the rule-based Density controller
-(−7.8 s per vehicle, 95% CI [−12.3, −3.7]) and by 40% versus a fixed-time signal, with a
-shorter worst-case wait as well. Its reward weighs every waiting vehicle by how long it has
-waited, so many long-waiting vehicles count more than one. With simulated camera errors
-(missed and phantom detections, lost tracks) it loses only ~3% (19.2 s). It is slightly
-behind Density in light traffic only.
+(−8.0 s per vehicle, 95% CI [−10.5, −5.8]) and by 40% versus a fixed-time signal, with a
+shorter worst-case wait, and it wins in all five traffic profiles. It runs inside a rule-based
+safety envelope (never green for an empty phase while vehicles wait elsewhere, a 90 s
+maximum red, fixed rotation if the camera fails). Its reward weighs every waiting vehicle by
+how long it has waited, so many long-waiting vehicles count more than one. With simulated
+camera errors it loses about 2% (18.8 s). Both RL rows include the safety envelope.
 
 ![Delay by scenario](images/G3_delay_by_profile.png)
+
+## Watch it
+
+```bash
+python visualize.py            # records every scenario and opens simulation_viewer.html
+```
+
+The viewer replays Fixed Timer, Density and the DQN side by side on identical traffic:
+signals, queues (coloured by how long the front car has waited), ambulances, safety-rule
+actions, a camera-outage badge, a queue chart and an end-of-run table, for the 5 standard
+profiles and the 12 edge cases below. Every frame is recorded from the real simulator.
+
+## Edge cases and what is guaranteed
+
+`python -m evaluation.stress_test` runs every controller through 12 hand-built situations
+(empty junction, a lone car per lane at night, a flooded lane, main road vs side road,
+400 cars at once, a sudden surge, all trucks, ambulances on every approach at once, an
+ambulance stuck behind a queue, an ambulance every 20 s, demand 30% above capacity, a
+camera outage) and checks the safety rules on **every tick**. Results:
+[results/stress_test.md](results/stress_test.md).
+
+- **Guaranteed by rules and verified on every tick of every scenario (0 violations):** only
+  the active phase's lanes are green, yellow before every switch, every green 10–40 s, no
+  vehicle lost, every ambulance served.
+- **Measured, not guaranteed:** the DQN has the lowest average delay in 11 of 12 edge cases
+  and is second in the overloaded one. Its longest wait is the best or between the two
+  baselines in most cases. It is above both in three (ambulances on all four approaches at
+  once, demand beyond capacity, the camera outage), by 4–46 s.
+- No controller can be proven optimal in every case. The learned policy is kept inside a
+  rule-based envelope so its failures are bounded: without it, a lone car at an empty
+  junction waited 332 s; with it, 14 s.
 
 ## Quickstart
 
@@ -41,7 +73,9 @@ pip install -r requirements.txt     # numpy, matplotlib, pytest
 python main.py                      # live console simulation (Fixed Timer, 100 ticks)
 python run_experiments.py           # train RL (3 seeds x 2 agents, parallel) + evaluate all (~3 min)
 python run_experiments.py --use-saved   # re-evaluate saved models only (~10 s)
-python -m pytest                    # 76 tests (~40 s)
+python -m pytest                    # 88 tests (~40 s)
+python visualize.py                 # build and open the simulation viewer
+python -m evaluation.stress_test    # edge cases + safety invariants -> results/stress_test.md
 ```
 
 Pick a controller and scenario in code:
@@ -90,7 +124,8 @@ analytics/        KPIs and per-tick CSV logging
 perception/       what the controller sees: per-lane counts and waits (simulated; camera later)
 env/              Gym-style RL environment and observation builder
 rl/               tabular Q-learning, numpy DQN (MLP, Adam, replay), training loop
-evaluation/       quick side-by-side strategy comparison
+evaluation/       edge-case stress test + safety-invariant monitor; quick strategy comparison
+viewer/, visualize.py   the simulation viewer (recorded replays)
 tests/            pytest suite (CI: .github/workflows/tests.yml)
 run_experiments.py   the controlled experiment that produces results/ and images/
 ```

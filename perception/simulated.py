@@ -43,6 +43,27 @@ class GroundTruthPerception:
         return IntersectionObservation(intersection.time, lanes)
 
 
+class BlackoutPerception:
+    """
+    Wraps another perception source and simulates a sensor outage between
+    `start` and `end` seconds: no detections, available=False.
+    """
+
+    def __init__(self, base=None, start=0.0, end=float("inf")):
+        self.base = base if base is not None else GroundTruthPerception()
+        self.start, self.end = start, end
+
+    def reset(self):
+        self.base.reset()
+
+    def observe(self, intersection) -> IntersectionObservation:
+        if self.start <= intersection.time < self.end:
+            lanes = tuple(LaneObservation(mid, approach, ())
+                          for mid, approach, _ in _lanes(intersection))
+            return IntersectionObservation(intersection.time, lanes, available=False)
+        return self.base.observe(intersection)
+
+
 class NoisyPerception:
     """
     Ground truth degraded by simulated camera errors (see config/perception.py).

@@ -1,0 +1,391 @@
+<title>IntelliFlow Junction Replay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: control-room console. Transport bar on top, three synchronised junction
+   views (one per controller), then the queue chart and the end-of-run table. */
+:root {
+  --bg: #e8ebee;            /* concrete */
+  --panel: #f7f8f9;
+  --line: #c9cfd5;
+  --fg: #1d2329;
+  --muted: #5d6874;
+  --accent: #8a6400;        /* road-marking yellow, darkened for text on light */
+  --marking: #f2c230;       /* lane markings drawn on asphalt (both themes) */
+  --asphalt: #343a40;
+  --ground: #d5dad0;
+  --go: #23a764; --caution: #e59a12; --stop: #d93d42;
+  --veh: #f4f6f8; --veh-edge: #0f1316;
+  --c-fixed: #7b8794; --c-density: #2f74d0; --c-dqn: #0f9d8a;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121619; --panel: #1a2025; --line: #2c343b; --fg: #e3e8ec; --muted: #94a0ab;
+    --accent: #f2c230; --asphalt: #2a2f34; --ground: #20262b;
+    --veh: #e9edf0; --veh-edge: #0b0e10;
+    --c-fixed: #9aa5b1; --c-density: #5b9bf0; --c-dqn: #2cc7b0; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121619; --panel: #1a2025; --line: #2c343b; --fg: #e3e8ec; --muted: #94a0ab;
+  --accent: #f2c230; --asphalt: #2a2f34; --ground: #20262b;
+  --veh: #e9edf0; --veh-edge: #0b0e10;
+  --c-fixed: #9aa5b1; --c-density: #5b9bf0; --c-dqn: #2cc7b0; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px;
+       line-height: 1.5; margin: 0; }
+.wrap { max-width: 1320px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 40px;
+        display: grid; gap: 18px; }
+header { display: grid; gap: 4px; }
+h1 { font-family: var(--font-display); font-weight: 700; font-size: 2.1rem; letter-spacing: .02em;
+     line-height: 1.05; margin: 0; text-wrap: balance; }
+h1 span { color: var(--accent); }
+.sub { color: var(--muted); margin: 0; max-width: 70ch; }
+.bar { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+       display: grid; gap: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+label.cap, .cap { font-family: var(--font-display); font-weight: 600; text-transform: uppercase;
+       letter-spacing: .08em; font-size: .8rem; color: var(--muted); }
+select, button { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+       border-radius: 7px; padding: 6px 10px; }
+select { min-width: 0; max-width: 100%; }
+button { cursor: pointer; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#play { font-family: var(--font-display); font-weight: 700; letter-spacing: .06em; min-width: 92px;
+        background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.speeds { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.speeds button { border: 0; border-radius: 0; background: transparent; padding: 6px 11px;
+        font-family: var(--font-mono); font-size: .85rem; }
+.speeds button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.timeline { display: flex; align-items: center; gap: 12px; }
+.timeline input { flex: 1; min-width: 0; accent-color: var(--accent); }
+.clock { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: .95rem; }
+#desc { margin: 0; color: var(--fg); max-width: 75ch; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.view { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+        display: grid; gap: 10px; min-width: 0; }
+.view h2 { font-family: var(--font-display); font-weight: 700; font-size: 1.35rem; margin: 0;
+        letter-spacing: .03em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; min-height: 24px; }
+.chip { font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+        font-size: .75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.chip.stop { color: var(--stop); } .chip.caution { color: var(--caution); } .chip.go { color: var(--go); }
+.chip.quiet { color: var(--muted); }
+canvas.junction { width: 100%; max-width: 100%; aspect-ratio: 1; display: block; border-radius: 8px; }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.stat { display: grid; gap: 2px; }
+.stat b { font-family: var(--font-mono); font-weight: 500; font-variant-numeric: tabular-nums; font-size: 1.1rem; }
+.stat small { color: var(--muted); font-size: .72rem; line-height: 1.25; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+        display: grid; gap: 10px; min-width: 0; }
+.card h3 { font-family: var(--font-display); font-weight: 700; font-size: 1.15rem; margin: 0; letter-spacing: .03em; }
+#chart { width: 100%; height: 190px; display: block; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: .85rem; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-family: var(--font-display); font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+     font-size: .78rem; color: var(--muted); }
+td { font-family: var(--font-mono); font-size: .9rem; }
+td.best { color: var(--go); font-weight: 600; }
+.note { color: var(--muted); font-size: .85rem; margin: 0; max-width: 90ch; }
+@media (max-width: 520px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } h1 { font-size: 1.7rem; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="cap">IntelliFlow · 4-way junction · 10-phase plan · left-hand traffic</div>
+    <h1>Junction <span>Replay</span></h1>
+    <p class="sub">Three controllers handle the same traffic, second by second. Every frame was recorded
+      from the real simulator; nothing here is animated by hand.</p>
+  </header>
+
+  <section class="bar" aria-label="Playback">
+    <div class="row">
+      <label class="cap" for="scenario">Scenario</label>
+      <select id="scenario"></select>
+      <button id="play" type="button">PAUSE</button>
+      <span class="cap">Speed</span>
+      <span class="speeds" role="group" aria-label="Playback speed" id="speeds"></span>
+    </div>
+    <p id="desc"></p>
+    <div class="timeline">
+      <input id="scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Simulation time">
+      <span class="clock" id="clock">0:00 / 0:00</span>
+    </div>
+  </section>
+
+  <section class="grid3" id="views" aria-label="Controllers"></section>
+
+  <section class="card">
+    <h3>Vehicles waiting at the junction</h3>
+    <canvas id="chart" aria-label="Vehicles queued over time for each controller"></canvas>
+    <div class="legend" id="chartlegend"></div>
+  </section>
+
+  <section class="card">
+    <h3>At the end of this scenario</h3>
+    <div class="tablewrap"><table id="final"></table></div>
+    <p class="note">Average delay counts every vehicle, including ones still waiting at the end.
+      DQN is the deployed controller: the learned policy inside a rule-based safety envelope
+      (never green for an empty phase while others wait, maximum red <span id="maxred"></span> s,
+      fixed rotation if the camera fails).</p>
+  </section>
+
+  <section class="card">
+    <h3>Reading the junction</h3>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--go)"></i>Green</span>
+      <span><i class="dot" style="background:var(--caution)"></i>Yellow</span>
+      <span><i class="dot" style="background:var(--stop)"></i>Red</span>
+      <span><i class="swatch" style="background:var(--veh);outline:1px solid var(--muted)"></i>Queue, front car waited &lt; 30 s</span>
+      <span><i class="swatch" style="background:var(--caution)"></i>30–60 s</span>
+      <span><i class="swatch" style="background:var(--stop)"></i>Over 60 s</span>
+      <span><i class="swatch" style="background:var(--stop);outline:2px solid var(--veh)"></i>Ambulance in lane</span>
+    </div>
+    <p class="note">Vehicles drive on the left. On each arm the four incoming lanes run from the
+      centre line outwards: U-turn, right, straight, left. Lane numbers past 9 cars show as “+n”.</p>
+  </section>
+</div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const COLORS = { "Fixed Timer": "--c-fixed", "Density": "--c-density", "DQN": "--c-dqn" };
+const SPEEDS = [1, 5, 20, 60];
+const state = { scenario: null, frame: 0, playing: true, speed: 5, last: null };
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmtTime = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// ---------- controls ----------
+const sel = document.getElementById("scenario");
+const groups = {};
+for (const sc of DATA.scenarios) {
+  if (!groups[sc.group]) { groups[sc.group] = document.createElement("optgroup"); groups[sc.group].label = sc.group; sel.append(groups[sc.group]); }
+  const o = document.createElement("option"); o.value = sc.id; o.textContent = sc.label; groups[sc.group].append(o);
+}
+const speeds = document.getElementById("speeds");
+for (const s of SPEEDS) {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = s + "×";
+  b.addEventListener("click", () => { state.speed = s; syncSpeeds(); }); speeds.append(b);
+}
+function syncSpeeds() { [...speeds.children].forEach((b, i) => b.setAttribute("aria-pressed", SPEEDS[i] === state.speed)); }
+document.getElementById("maxred").textContent = DATA.safety.max_red;
+
+const playBtn = document.getElementById("play");
+playBtn.addEventListener("click", () => setPlaying(!state.playing));
+function setPlaying(p) { state.playing = p; playBtn.textContent = p ? "PAUSE" : "PLAY"; state.last = null; }
+document.addEventListener("keydown", e => { if (e.code === "Space" && e.target === document.body) { e.preventDefault(); setPlaying(!state.playing); } });
+const scrub = document.getElementById("scrub");
+scrub.addEventListener("input", () => { state.frame = +scrub.value; draw(); });
+sel.addEventListener("change", () => loadScenario(sel.value, 0));
+
+// ---------- views ----------
+const viewsEl = document.getElementById("views");
+const views = DATA.controllers.map(name => {
+  const v = document.createElement("article"); v.className = "view";
+  v.innerHTML = `<h2><i class="swatch" style="background:var(${COLORS[name]})"></i>${name}</h2>
+    <div class="chips"></div><canvas class="junction" role="img" aria-label="${name} junction view"></canvas>
+    <div class="stats">
+      <div class="stat"><b data-k="avg">–</b><small>avg delay so far (s)</small></div>
+      <div class="stat"><b data-k="maxw">–</b><small>longest wait (s)</small></div>
+      <div class="stat"><b data-k="queued">–</b><small>waiting now</small></div>
+      <div class="stat"><b data-k="served">–</b><small>served</small></div></div>`;
+  viewsEl.append(v);
+  return { name, el: v, canvas: v.querySelector("canvas"), chips: v.querySelector(".chips"),
+           stats: Object.fromEntries([...v.querySelectorAll("[data-k]")].map(b => [b.dataset.k, b])) };
+});
+
+function sizeCanvas(c) {
+  const r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  return { w, h, dpr };
+}
+
+// lane index helpers: data lanes are approach-major, movements L,S,R,U.
+const APPROACHES = ["North", "East", "South", "West"];      // clockwise drawing order
+const MOVES = ["LEFT", "STRAIGHT", "RIGHT", "UTURN"];
+const FROM_MEDIAN = { UTURN: 0, RIGHT: 1, STRAIGHT: 2, LEFT: 3 };   // left-hand traffic
+const LETTER = { UTURN: "U", RIGHT: "R", STRAIGHT: "S", LEFT: "L" };
+
+function drawJunction(view, run, i) {
+  const { w } = sizeCanvas(view.canvas);
+  const ctx = view.canvas.getContext("2d");
+  const S = w, c = S / 2, lw = S * 0.046, half = lw * 4;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = css("--ground"); ctx.fillRect(0, 0, S, S);
+  ctx.fillStyle = css("--asphalt");
+  ctx.fillRect(c - half, 0, half * 2, S); ctx.fillRect(0, c - half, S, half * 2);
+  const sig = run.sig[i], q = run.q[i], wt = run.w[i], amb = run.amb[i];
+  const veh = css("--veh"), edge = css("--veh-edge"), mark = css("--marking");
+  const colors = { g: css("--go"), y: css("--caution"), r: css("--stop") };
+  APPROACHES.forEach((ap, k) => {
+    ctx.save(); ctx.translate(c, c); ctx.rotate(k * Math.PI / 2);
+    // centre line and lane dividers on this arm
+    ctx.strokeStyle = mark; ctx.lineWidth = Math.max(1, lw * 0.07);
+    ctx.beginPath(); ctx.moveTo(0, -half); ctx.lineTo(0, -c); ctx.stroke();
+    ctx.setLineDash([lw * 0.35, lw * 0.35]); ctx.strokeStyle = "rgba(255,255,255,.35)"; ctx.lineWidth = Math.max(1, lw * 0.04);
+    for (let j = 1; j < 4; j++) { ctx.beginPath(); ctx.moveTo(j * lw, -half); ctx.lineTo(j * lw, -c); ctx.stroke();
+                                  ctx.beginPath(); ctx.moveTo(-j * lw, -half); ctx.lineTo(-j * lw, -c); ctx.stroke(); }
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "rgba(255,255,255,.8)"; ctx.lineWidth = Math.max(1.5, lw * 0.09);
+    ctx.beginPath(); ctx.moveTo(0, -half); ctx.lineTo(half, -half); ctx.stroke();     // stop line
+    MOVES.forEach((mv, mi) => {
+      const idx = DATA.lanes.indexOf(`${ap}_${mv}`);
+      const x0 = FROM_MEDIAN[mv] * lw, xc = x0 + lw / 2;
+      // signal head at the stop line
+      ctx.fillStyle = colors[sig[idx]];
+      ctx.beginPath(); ctx.arc(xc, -half + lw * 0.42, lw * 0.3, 0, Math.PI * 2); ctx.fill();
+      // queue
+      const n = q[idx], hw = wt[idx];
+      const fill = hw >= 60 ? colors.r : hw >= 30 ? colors.y : veh;
+      const step = lw * 0.95, room = c - half - lw * 1.1, maxShown = Math.min(9, Math.floor(room / step) - 1);
+      const shown = Math.min(n, maxShown);
+      for (let v = 0; v < shown; v++) {
+        const y = -half - lw * 0.25 - (v + 1) * step;
+        ctx.fillStyle = fill; ctx.strokeStyle = edge; ctx.lineWidth = Math.max(1, lw * 0.05);
+        roundRect(ctx, xc - lw * 0.32, y + step * 0.1, lw * 0.64, step * 0.8, lw * 0.12); ctx.fill(); ctx.stroke();
+      }
+      if (amb & (1 << idx)) {                      // ambulance marker behind the queue
+        const y = -half - lw * 0.25 - (shown + 1) * step;
+        ctx.fillStyle = colors.r; ctx.strokeStyle = veh; ctx.lineWidth = Math.max(1.5, lw * 0.08);
+        roundRect(ctx, xc - lw * 0.36, y + step * 0.05, lw * 0.72, step * 0.9, lw * 0.12); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = veh; ctx.fillRect(xc - lw * 0.06, y + step * 0.25, lw * 0.12, step * 0.5);
+        ctx.fillRect(xc - lw * 0.2, y + step * 0.44, lw * 0.4, step * 0.12);
+      }
+      if (n > shown) {
+        ctx.save(); ctx.translate(xc, -half - lw * 0.25 - (shown + 1.6) * step - (amb & (1 << idx) ? step : 0));
+        ctx.rotate(-k * Math.PI / 2); ctx.fillStyle = mark; ctx.font = `600 ${lw * 0.5}px ${css("--font-mono")}`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(`+${n - shown}`, 0, 0); ctx.restore();
+      }
+      // movement letter painted on the road near the stop line
+      ctx.save(); ctx.translate(xc, -half - lw * 0.05); ctx.rotate(-k * Math.PI / 2);
+      ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.font = `600 ${lw * 0.36}px ${css("--font-display")}`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(LETTER[mv], 0, 0); ctx.restore();
+    });
+    // approach name at the end of the arm
+    ctx.save(); ctx.translate(half * 0.5, -c + lw * 0.6); ctx.rotate(-k * Math.PI / 2);
+    ctx.fillStyle = css("--fg"); ctx.font = `700 ${lw * 0.55}px ${css("--font-display")}`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(ap.toUpperCase(), 0, 0); ctx.restore();
+    ctx.restore();
+  });
+  // phase badge in the middle of the junction
+  const p = run.phase[i];
+  const label = p === 10 ? "EMERGENCY" : p < 0 ? "ALL RED" : "PHASE " + (p + 1);
+  ctx.font = `700 ${lw * (p === 10 ? 0.52 : 0.62)}px ${css("--font-display")}`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = p === 10 ? css("--stop") : "rgba(255,255,255,.9)";
+  ctx.fillText(label, c, c);
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+function chips(view, run, i) {
+  const out = [];
+  if (run.phase[i] === 10) out.push(["Ambulance priority", "stop"]);
+  if (run.camera && !run.camera[i]) out.push(["Camera down · fixed rotation", "caution"]);
+  let recent = false; for (let k = Math.max(0, i - 3); k <= i; k++) if (run.override[k]) recent = true;
+  if (recent && run.camera[i]) out.push(["Safety rule acted", "go"]);
+  if (!out.length) out.push(["Normal control", "quiet"]);
+  view.chips.innerHTML = out.map(([t, c]) => `<span class="chip ${c}">${t}</span>`).join("");
+}
+
+// ---------- chart ----------
+const chart = document.getElementById("chart");
+function drawChart() {
+  const runs = DATA.runs[state.scenario];
+  const { w, h, dpr } = sizeCanvas(chart);
+  const ctx = chart.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, w, h);
+  const padL = 44 * dpr, padB = 22 * dpr, padT = 8 * dpr, padR = 10 * dpr;
+  const n = runs[DATA.controllers[0]].queued.length;
+  let ymax = 1; for (const c of DATA.controllers) for (const v of runs[c].queued) ymax = Math.max(ymax, v);
+  const nice = ymax <= 10 ? 10 : Math.pow(10, Math.floor(Math.log10(ymax))) * Math.ceil(ymax / Math.pow(10, Math.floor(Math.log10(ymax))));
+  const X = t => padL + (w - padL - padR) * t / Math.max(1, n - 1);
+  const Y = v => h - padB - (h - padB - padT) * v / nice;
+  ctx.font = `${11 * dpr}px ${css("--font-mono")}`; ctx.fillStyle = css("--muted"); ctx.strokeStyle = css("--line");
+  ctx.lineWidth = dpr; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let k = 0; k <= 4; k++) { const v = nice * k / 4, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w - padR, y); ctx.stroke(); ctx.fillText(Math.round(v), padL - 6 * dpr, y); }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (let k = 0; k <= 5; k++) { const t = Math.round((n - 1) * k / 5); ctx.fillText(fmtTime(t), X(t), h - padB + 6 * dpr); }
+  for (const c of DATA.controllers) {
+    const arr = runs[c].queued; ctx.strokeStyle = css(COLORS[c]); ctx.lineWidth = 2 * dpr; ctx.beginPath();
+    arr.forEach((v, t) => t ? ctx.lineTo(X(t), Y(v)) : ctx.moveTo(X(t), Y(v))); ctx.stroke();
+    const i = Math.min(state.frame, arr.length - 1);
+    ctx.fillStyle = css(COLORS[c]); ctx.beginPath(); ctx.arc(X(i), Y(arr[i]), 3.5 * dpr, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.strokeStyle = css("--fg"); ctx.globalAlpha = .35; ctx.lineWidth = dpr;
+  ctx.beginPath(); ctx.moveTo(X(state.frame), padT); ctx.lineTo(X(state.frame), h - padB); ctx.stroke(); ctx.globalAlpha = 1;
+}
+document.getElementById("chartlegend").innerHTML = DATA.controllers.map(c =>
+  `<span><i class="swatch" style="background:var(${COLORS[c]})"></i>${c}</span>`).join("");
+
+// ---------- end-of-run table ----------
+function finalTable() {
+  const runs = DATA.runs[state.scenario];
+  const rows = DATA.controllers.map(c => { const r = runs[c], k = r.avg.length - 1;
+    return { c, avg: r.avg[k], maxw: r.maxw[k], served: r.served[k], queued: r.queued[k] }; });
+  const best = { avg: Math.min(...rows.map(r => r.avg)), maxw: Math.min(...rows.map(r => r.maxw)),
+                 queued: Math.min(...rows.map(r => r.queued)) };
+  document.getElementById("final").innerHTML =
+    `<thead><tr><th>Controller</th><th>Avg delay (s)</th><th>Longest wait (s)</th><th>Served</th><th>Still waiting</th></tr></thead><tbody>` +
+    rows.map(r => `<tr><td>${r.c}</td><td class="${r.avg === best.avg ? "best" : ""}">${r.avg.toFixed(1)}</td>
+      <td class="${r.maxw === best.maxw ? "best" : ""}">${r.maxw}</td><td>${r.served}</td>
+      <td class="${r.queued === best.queued ? "best" : ""}">${r.queued}</td></tr>`).join("") + "</tbody>";
+}
+
+// ---------- main loop ----------
+function draw() {
+  const runs = DATA.runs[state.scenario];
+  const n = runs[DATA.controllers[0]].avg.length;
+  const i = Math.min(n - 1, Math.max(0, Math.floor(state.frame)));
+  for (const v of views) {
+    const r = runs[v.name]; drawJunction(v, r, i); chips(v, r, i);
+    v.stats.avg.textContent = r.avg[i].toFixed(1); v.stats.maxw.textContent = r.maxw[i];
+    v.stats.queued.textContent = r.queued[i]; v.stats.served.textContent = r.served[i];
+  }
+  scrub.value = i;
+  document.getElementById("clock").textContent = `${fmtTime(i)} / ${fmtTime(n - 1)}`;
+  drawChart();
+}
+function loadScenario(id, startFraction) {
+  state.scenario = id; sel.value = id;
+  const sc = DATA.scenarios.find(s => s.id === id);
+  document.getElementById("desc").textContent = sc.description;
+  const n = DATA.runs[id][DATA.controllers[0]].avg.length;
+  scrub.max = n - 1; state.frame = Math.floor((n - 1) * startFraction);
+  finalTable(); draw();
+}
+function tick(ts) {
+  if (state.playing) {
+    if (state.last != null) {
+      const n = DATA.runs[state.scenario][DATA.controllers[0]].avg.length;
+      state.frame += state.speed * (ts - state.last) / 1000;
+      if (state.frame >= n - 1) { state.frame = n - 1; setPlaying(false); }
+      draw();
+    }
+    state.last = ts;
+  }
+  requestAnimationFrame(tick);
+}
+window.addEventListener("resize", draw);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+new MutationObserver(draw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+syncSpeeds();
+const first = DATA.scenarios.find(s => s.id === "std:RUSH_HOUR") || DATA.scenarios[0];
+loadScenario(first.id, 0.35);
+setPlaying(!reduceMotion);
+requestAnimationFrame(tick);
+</script>

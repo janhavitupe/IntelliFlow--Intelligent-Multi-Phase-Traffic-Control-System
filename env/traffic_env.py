@@ -123,7 +123,9 @@ class TrafficRLEnv:
         self.intersection = Intersection()
         perception = (self.perception_factory(self.seed)
                       if self.perception_factory is not None else None)
-        self.strategy = RLStrategy(perception=perception)
+        # Safety envelope off: during training every executed action must be
+        # the agent's own, or Q-learning would credit it for rule overrides.
+        self.strategy = RLStrategy(perception=perception, max_red=None, serve_waiting=False)
         self.scheduler = TrafficScheduler(
             self.intersection,
             self.strategy,

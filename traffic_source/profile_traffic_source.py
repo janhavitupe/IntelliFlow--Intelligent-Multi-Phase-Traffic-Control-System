@@ -66,7 +66,10 @@ class ProfileTrafficSource(BaseTrafficSource):
         Returns:
             list of (approach, movement_type, Vehicle) tuples.
         """
-        spec = profiles.profile_for_time(self.profile_key, time)
+        return self._spawns_from_spec(profiles.profile_for_time(self.profile_key, time), time)
+
+    def _spawns_from_spec(self, spec: dict, time: float):
+        """Random arrivals for one tick from a window spec {rates, mix}."""
         rates = spec.get("rates", {})
         mix = spec.get("mix", profiles.MIX_DEFAULT)
 

@@ -66,8 +66,8 @@ Mean over all profiles and test seeds. RL: mean ± std across training seeds.
 |---|---|---|---|---|---|---|---|---|
 | Fixed Timer | 31.0 | 112.1 | 178.0 | 15.6 | 71.2 | 1.224 | 5791.7 | +0.0% |
 | Density | 26.6 | 89.6 | 141.5 | 13.1 | 61.8 | 1.250 | 4369.7 | +16.8% |
-| Q-Learning | 34.3 ± 2.1 | 129.0 ± 9.3 | 224.4 ± 14.8 | 14.8 ± 0.8 | 71.2 ± 3.8 | 1.238 ± 0.011 | 5203.3 ± 356.2 | -27.2% |
-| DQN | 18.7 ± 1.6 | 66.7 ± 5.8 | 130.3 ± 12.6 | 8.3 ± 1.2 | 39.5 ± 3.9 | 1.324 ± 0.013 | 1994.0 ± 336.3 | +34.2% |
+| Q-Learning | 25.3 ± 1.8 | 85.1 ± 4.4 | 129.6 ± 5.7 | 13.8 ± 1.1 | 62.6 ± 4.5 | 1.262 ± 0.007 | 4417.5 ± 472.0 | +26.8% |
+| DQN | 18.5 ± 0.7 | 65.7 ± 1.5 | 104.7 ± 4.2 | 9.5 ± 0.8 | 45.6 ± 2.0 | 1.300 ± 0.006 | 2624.7 ± 216.4 | +47.1% |
 
 _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean, over profiles, of the % reduction in avg delay vs Fixed Timer (positive = better), so every profile counts equally._
 
@@ -77,23 +77,23 @@ _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean
 |---|---|---|---|---|---|
 | Fixed Timer | 13.5 | 18.3 | 85.8 | 16.0 | 21.6 |
 | Density | 11.8 | 11.0 | 76.3 | 13.9 | 19.9 |
-| Q-Learning | 16.7 | 25.3 | 76.0 | 22.8 | 30.9 |
-| DQN | 13.2 | 8.8 | 49.1 | 13.1 | 9.4 |
+| Q-Learning | 6.3 | 15.5 | 76.5 | 9.2 | 18.9 |
+| DQN | 5.7 | 9.3 | 58.5 | 8.9 | 10.3 |
 
 ### DQN vs Density
 
-Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-7.84 s** (95% bootstrap CI -12.33 to -3.73 s). The interval excludes 0.
+Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-8.03 s** (95% bootstrap CI -10.51 to -5.75 s). The interval excludes 0.
 
-### Robustness and deployment options (same trained DQNs)
+### Safety envelope and robustness (same trained DQNs)
 
 | Variant | Avg delay/veh (s) | P95 delay (s) | Max delay (s) | Ambulance delay (s) | Avg queue (veh) | Throughput (veh/s) |
 |---|---|---|---|---|---|---|
-| DQN | 18.7 ± 1.6 | 66.7 ± 5.8 | 130.3 ± 12.6 | 8.3 ± 1.2 | 39.5 ± 3.9 | 1.324 ± 0.013 |
-| DQN + camera noise | 19.2 ± 0.2 | 71.4 ± 2.2 | 127.6 ± 3.0 | 8.1 ± 0.4 | 40.3 ± 0.7 | 1.317 ± 0.007 |
-| DQN + max-red 90 s | 20.2 ± 1.0 | 72.7 ± 2.9 | 117.0 ± 5.9 | 9.3 ± 0.9 | 45.4 ± 2.6 | 1.300 ± 0.006 |
+| DQN | 18.5 ± 0.7 | 65.7 ± 1.5 | 104.7 ± 4.2 | 9.5 ± 0.8 | 45.6 ± 2.0 | 1.300 ± 0.006 |
+| DQN (raw policy) | 18.7 ± 1.6 | 66.7 ± 5.8 | 130.3 ± 12.6 | 8.3 ± 1.2 | 39.5 ± 3.9 | 1.324 ± 0.013 |
+| DQN + camera noise | 18.8 ± 0.4 | 67.4 ± 1.2 | 109.8 ± 3.4 | 9.3 ± 0.2 | 45.6 ± 1.2 | 1.301 ± 0.005 |
 
 - **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% lost tracks). Assumed rates, to be calibrated on real footage.
-- **Max-red 90 s**: optional safety rule; a lane with vehicles that has been red longer than 90 s is served next. Off by default (on validation it lowered worst-case waits but cost more average delay than the pre-set 0.5 s limit).
+- **DQN** (the deployed controller) = the learned policy inside a rule-based safety envelope: never give green to an empty phase while vehicles wait elsewhere; a lane with vehicles is served once it has been red 90 s; on camera failure, fixed-order rotation. **DQN (raw policy)** is the learned policy alone. The envelope was chosen on the edge-case stress test (results/stress_test.md). Both RL rows in the tables above (Q-Learning and DQN) run inside the envelope.
 
 ## Training curves
 

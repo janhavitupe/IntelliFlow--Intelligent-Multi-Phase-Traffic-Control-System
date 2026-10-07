@@ -74,7 +74,7 @@ class _AlwaysPhase1:
 
 def test_max_red_rule_overrides_the_agent_for_starved_lanes(intersection):
     from config.phases import build_phase_plan
-    strategy = RLStrategy(agent=_AlwaysPhase1(), max_red=90.0)
+    strategy = RLStrategy(agent=_AlwaysPhase1(), max_red=90.0, serve_waiting=False)
     phase1 = build_phase_plan(intersection)[PhaseType.PHASE_1]
     add(intersection, "East", car(waiting=100.0))              # East_STRAIGHT: not in PHASE_1
 
@@ -83,3 +83,30 @@ def test_max_red_rule_overrides_the_agent_for_starved_lanes(intersection):
     served = {m.movement_id for m in build_phase_plan(intersection)[strategy._phases[choice]].movements}
     assert "East_STRAIGHT" in served
     assert strategy.shield_overrides == 1
+
+
+def test_no_empty_green_serves_the_most_accumulated_waiting(intersection):
+    from config.phases import build_phase_plan
+    strategy = RLStrategy(agent=_AlwaysPhase1(), max_red=None, serve_waiting=True)
+    phase1 = build_phase_plan(intersection)[PhaseType.PHASE_1]
+    add(intersection, "East", car(waiting=20.0))               # East_STRAIGHT: not in PHASE_1
+    choice = strategy._get_action(intersection, phase1, time=30.0)
+    served = {m.movement_id for m in build_phase_plan(intersection)[strategy._phases[choice]].movements}
+    assert "East_STRAIGHT" in served and strategy.empty_green_overrides == 1
+    add(intersection, "West", car(waiting=5.0))                # now PHASE_1 serves someone
+    assert strategy._get_action(intersection, phase1, time=31.0) == 0
+
+
+def test_sensor_outage_falls_back_to_fixed_rotation(intersection):
+    from config.phases import build_phase_plan
+    from perception import BlackoutPerception
+    strategy = RLStrategy(agent=_AlwaysPhase1(), perception=BlackoutPerception(start=0.0))
+    phase3 = build_phase_plan(intersection)[PhaseType.PHASE_3]
+    assert strategy._get_action(intersection, phase3, time=10.0) == 3      # PHASE_4 next
+    assert strategy.fallback_decisions == 1
+
+
+def test_training_env_runs_without_the_safety_envelope():
+    env = TrafficRLEnv(profile_key="NORMAL_TRAFFIC", seed=1)
+    env.reset()
+    assert env.strategy.max_red is None and env.strategy.serve_waiting is False

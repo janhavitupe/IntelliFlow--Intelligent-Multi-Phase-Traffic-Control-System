@@ -45,9 +45,16 @@ class LaneObservation:
 
 @dataclass(frozen=True)
 class IntersectionObservation:
-    """Per-lane observations in LANE_ORDER, at simulation time `time`."""
+    """
+    Per-lane observations in LANE_ORDER, at simulation time `time`.
+
+    `available` is False when the sensor itself is down (e.g. a camera
+    outage); the lanes then carry no information, which is NOT the same as
+    "no vehicles".
+    """
     time: float
     lanes: tuple
+    available: bool = True
 
     def lane(self, movement_id: str) -> LaneObservation:
         return self.lanes[LANE_ORDER.index(movement_id)]

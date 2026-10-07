@@ -99,10 +99,9 @@ CONTROLLERS = RULE_BASED + RL_AGENTS
 
 # Robustness / deployment-option evaluations of the SAME trained DQNs (no
 # selection is made with these; they only report how the policy holds up).
-SAFETY_MAX_RED = 90.0
 VARIANT_ROWS = {
+    "DQN (raw policy)": {"max_red": None, "serve_waiting": False},
     "DQN + camera noise": {"perception": "noisy"},
-    f"DQN + max-red {SAFETY_MAX_RED:.0f} s": {"max_red": SAFETY_MAX_RED},
 }
 
 # (key, label, higher_is_better)
@@ -195,7 +194,8 @@ def strategy_factory(name, train_seed=None):
         opts = VARIANT_ROWS[name]
         agent = load_agent("DQN", train_seed)
         noisy = opts.get("perception") == "noisy"
-        return lambda: RLStrategy(agent=agent, max_red=opts.get("max_red"),
+        safety = {k: opts[k] for k in ("max_red", "serve_waiting") if k in opts}
+        return lambda: RLStrategy(agent=agent, **safety,
                                   perception=NoisyPerception(seed=0) if noisy else None)
     agent = load_agent(name, train_seed)
     return lambda: RLStrategy(agent=agent)
@@ -544,7 +544,7 @@ def write_model_card(rows, training, path):
         + ("The interval excludes 0." if lo > 0 or hi < 0 else
            "The interval includes 0: no significant difference."))
     add("")
-    add("### Robustness and deployment options (same trained DQNs)")
+    add("### Safety envelope and robustness (same trained DQNs)")
     add("")
     add("| Variant | " + " | ".join(label for _, label, _ in METRICS[:6]) + " |")
     add("|" + "---|" * 7)
@@ -556,10 +556,12 @@ def write_model_card(rows, training, path):
     add("- **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% "
         "phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% "
         "lost tracks). Assumed rates, to be calibrated on real footage.")
-    add(f"- **Max-red {SAFETY_MAX_RED:.0f} s**: optional safety rule; a lane with vehicles "
-        f"that has been red longer than {SAFETY_MAX_RED:.0f} s is served next. Off by default "
-        "(on validation it lowered worst-case waits but cost more average delay than the "
-        "pre-set 0.5 s limit).")
+    add("- **DQN** (the deployed controller) = the learned policy inside a rule-based safety "
+        "envelope: never give green to an empty phase while vehicles wait elsewhere; a lane "
+        f"with vehicles is served once it has been red {rl_config.SAFETY_MAX_RED:.0f} s; on "
+        "camera failure, fixed-order rotation. **DQN (raw policy)** is the learned policy "
+        "alone. The envelope was chosen on the edge-case stress test (results/stress_test.md). "
+        "Both RL rows in the tables above (Q-Learning and DQN) run inside the envelope.")
     add("")
     add("## Training curves")
     add("")
