@@ -64,6 +64,56 @@ class BlackoutPerception:
         return self.base.observe(intersection)
 
 
+class HeadingIntentPerception:
+    """
+    Turn intent read from each vehicle's heading, as a camera would.
+
+    Drivers who will turn angle their vehicle toward the exit only near the
+    stop line. So for each turning lane, the first `visible_depth` vehicles
+    are reported in their true turning lane (except a `misread_rate` share,
+    read as going straight), while turning vehicles further back still face
+    straight and are reported as STRAIGHT demand on the same approach. Waits
+    are kept; nothing is added or lost.
+
+    Wraps any other source (ground truth by default, or NoisyPerception), so
+    detection errors and intent errors can be combined.
+    """
+
+    def __init__(self, base=None, seed=0, visible_depth=None, misread_rate=None):
+        self.base = base if base is not None else GroundTruthPerception()
+        self.seed = seed
+        self.visible_depth = cfg.INTENT_VISIBLE_DEPTH if visible_depth is None else visible_depth
+        self.misread_rate = cfg.INTENT_MISREAD_RATE if misread_rate is None else misread_rate
+        self.reset()
+
+    def reset(self):
+        self.base.reset()
+        self._rng = random.Random(self.seed)
+
+    def observe(self, intersection) -> IntersectionObservation:
+        obs = self.base.observe(intersection)
+        if not obs.available:
+            return obs
+        kept = {lane.movement_id: [] for lane in obs.lanes}
+        moved = {}                                         # approach -> waits read as straight
+        for lane in obs.lanes:
+            turning = not lane.movement_id.endswith("_STRAIGHT")
+            for position, wait in enumerate(lane.waits):
+                read_as_turning = (not turning) or (
+                    position < self.visible_depth and self._rng.random() >= self.misread_rate)
+                if read_as_turning:
+                    kept[lane.movement_id].append(wait)
+                else:
+                    moved.setdefault(lane.approach, []).append(wait)
+        lanes = []
+        for lane in obs.lanes:
+            waits = kept[lane.movement_id]
+            if lane.movement_id.endswith("_STRAIGHT") and lane.approach in moved:
+                waits = sorted(waits + moved[lane.approach], reverse=True)   # longest wait first
+            lanes.append(LaneObservation(lane.movement_id, lane.approach, tuple(waits)))
+        return IntersectionObservation(obs.time, tuple(lanes), available=obs.available)
+
+
 class NoisyPerception:
     """
     Ground truth degraded by simulated camera errors (see config/perception.py).

@@ -68,7 +68,7 @@ from simulation import Simulation
 from strategies.fixed_timer_strategy import FixedTimerStrategy
 from strategies.density_strategy import DensityStrategy
 from strategies.rl_strategy import RLStrategy
-from perception import NoisyPerception
+from perception import HeadingIntentPerception, NoisyPerception
 from rl.train import train_tabular, train_dqn, score_policy
 from rl.agents import TabularQAgent
 from rl.dqn import DQNAgent
@@ -102,7 +102,20 @@ CONTROLLERS = RULE_BASED + RL_AGENTS
 VARIANT_ROWS = {
     "DQN (raw policy)": {"max_red": None, "serve_waiting": False},
     "DQN + camera noise": {"perception": "noisy"},
+    "DQN + heading intent": {"perception": "intent"},
+    "DQN + intent + camera noise": {"perception": "intent+noisy"},
 }
+
+
+def make_perception(kind):
+    """Fresh perception source for one run (None = exact ground truth)."""
+    if kind == "noisy":
+        return NoisyPerception(seed=0)
+    if kind == "intent":
+        return HeadingIntentPerception(seed=0)
+    if kind == "intent+noisy":
+        return HeadingIntentPerception(base=NoisyPerception(seed=0), seed=0)
+    return None
 
 # (key, label, higher_is_better)
 METRICS = [
@@ -193,10 +206,9 @@ def strategy_factory(name, train_seed=None):
     if name in VARIANT_ROWS:
         opts = VARIANT_ROWS[name]
         agent = load_agent("DQN", train_seed)
-        noisy = opts.get("perception") == "noisy"
         safety = {k: opts[k] for k in ("max_red", "serve_waiting") if k in opts}
         return lambda: RLStrategy(agent=agent, **safety,
-                                  perception=NoisyPerception(seed=0) if noisy else None)
+                                  perception=make_perception(opts.get("perception")))
     agent = load_agent(name, train_seed)
     return lambda: RLStrategy(agent=agent)
 
@@ -556,6 +568,11 @@ def write_model_card(rows, training, path):
     add("- **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% "
         "phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% "
         "lost tracks). Assumed rates, to be calibrated on real footage.")
+    add(f"- **Heading intent**: the camera knows a vehicle's turn only from the way it faces. "
+        f"Only the first {perception_config.INTENT_VISIBLE_DEPTH} vehicles of a turning lane "
+        f"are angled toward their exit (and {perception_config.INTENT_MISREAD_RATE:.0%} of "
+        "those are still read as straight); turning vehicles further back are counted as "
+        "going straight.")
     add("- **DQN** (the deployed controller) = the learned policy inside a rule-based safety "
         "envelope: never give green to an empty phase while vehicles wait elsewhere; a lane "
         f"with vehicles is served once it has been red {rl_config.SAFETY_MAX_RED:.0f} s; on "

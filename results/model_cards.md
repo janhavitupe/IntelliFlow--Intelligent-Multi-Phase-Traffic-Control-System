@@ -66,8 +66,8 @@ Mean over all profiles and test seeds. RL: mean ± std across training seeds.
 |---|---|---|---|---|---|---|---|---|
 | Fixed Timer | 31.0 | 112.1 | 178.0 | 15.6 | 71.2 | 1.224 | 5791.7 | +0.0% |
 | Density | 26.6 | 89.6 | 141.5 | 13.1 | 61.8 | 1.250 | 4369.7 | +16.8% |
-| Q-Learning | 25.3 ± 1.8 | 85.1 ± 4.4 | 129.6 ± 5.7 | 13.8 ± 1.1 | 62.6 ± 4.5 | 1.262 ± 0.007 | 4417.5 ± 472.0 | +26.8% |
-| DQN | 18.5 ± 0.7 | 65.7 ± 1.5 | 104.7 ± 4.2 | 9.5 ± 0.8 | 45.6 ± 2.0 | 1.300 ± 0.006 | 2624.7 ± 216.4 | +47.1% |
+| Q-Learning | 24.3 ± 1.4 | 82.3 ± 4.5 | 126.6 ± 4.8 | 12.9 ± 0.8 | 60.7 ± 3.8 | 1.266 ± 0.005 | 4256.5 ± 436.2 | +31.0% |
+| DQN | 18.3 ± 0.6 | 64.2 ± 1.4 | 102.6 ± 3.5 | 9.5 ± 0.8 | 45.0 ± 2.0 | 1.302 ± 0.006 | 2526.9 ± 209.2 | +47.4% |
 
 _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean, over profiles, of the % reduction in avg delay vs Fixed Timer (positive = better), so every profile counts equally._
 
@@ -77,33 +77,36 @@ _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean
 |---|---|---|---|---|---|
 | Fixed Timer | 13.5 | 18.3 | 85.8 | 16.0 | 21.6 |
 | Density | 11.8 | 11.0 | 76.3 | 13.9 | 19.9 |
-| Q-Learning | 6.3 | 15.5 | 76.5 | 9.2 | 18.9 |
-| DQN | 5.7 | 9.3 | 58.5 | 8.9 | 10.3 |
+| Q-Learning | 6.2 | 13.2 | 74.9 | 8.5 | 18.6 |
+| DQN | 5.7 | 9.1 | 57.4 | 8.7 | 10.8 |
 
 ### DQN vs Density
 
-Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-8.03 s** (95% bootstrap CI -10.51 to -5.75 s). The interval excludes 0.
+Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-8.26 s** (95% bootstrap CI -10.99 to -5.80 s). The interval excludes 0.
 
 ### Safety envelope and robustness (same trained DQNs)
 
 | Variant | Avg delay/veh (s) | P95 delay (s) | Max delay (s) | Ambulance delay (s) | Avg queue (veh) | Throughput (veh/s) |
 |---|---|---|---|---|---|---|
-| DQN | 18.5 ± 0.7 | 65.7 ± 1.5 | 104.7 ± 4.2 | 9.5 ± 0.8 | 45.6 ± 2.0 | 1.300 ± 0.006 |
-| DQN (raw policy) | 18.7 ± 1.6 | 66.7 ± 5.8 | 130.3 ± 12.6 | 8.3 ± 1.2 | 39.5 ± 3.9 | 1.324 ± 0.013 |
-| DQN + camera noise | 18.8 ± 0.4 | 67.4 ± 1.2 | 109.8 ± 3.4 | 9.3 ± 0.2 | 45.6 ± 1.2 | 1.301 ± 0.005 |
+| DQN | 18.3 ± 0.6 | 64.2 ± 1.4 | 102.6 ± 3.5 | 9.5 ± 0.8 | 45.0 ± 2.0 | 1.302 ± 0.006 |
+| DQN (raw policy) | 19.0 ± 1.8 | 70.4 ± 8.9 | 140.1 ± 15.7 | 7.9 ± 1.0 | 38.4 ± 3.2 | 1.329 ± 0.009 |
+| DQN + camera noise | 18.9 ± 0.5 | 68.1 ± 0.2 | 108.5 ± 2.2 | 9.4 ± 0.3 | 45.7 ± 1.4 | 1.298 ± 0.006 |
+| DQN + heading intent | 18.6 ± 0.6 | 67.7 ± 2.7 | 108.3 ± 6.1 | 9.1 ± 0.4 | 45.2 ± 1.3 | 1.304 ± 0.004 |
+| DQN + intent + camera noise | 19.1 ± 0.3 | 71.0 ± 0.3 | 111.4 ± 2.0 | 9.1 ± 0.6 | 45.9 ± 1.4 | 1.298 ± 0.007 |
 
 - **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% lost tracks). Assumed rates, to be calibrated on real footage.
+- **Heading intent**: the camera knows a vehicle's turn only from the way it faces. Only the first 3 vehicles of a turning lane are angled toward their exit (and 5% of those are still read as straight); turning vehicles further back are counted as going straight.
 - **DQN** (the deployed controller) = the learned policy inside a rule-based safety envelope: never give green to an empty phase while vehicles wait elsewhere; a lane with vehicles is served once it has been red 90 s; on camera failure, fixed-order rotation. **DQN (raw policy)** is the learned policy alone. The envelope was chosen on the edge-case stress test (results/stress_test.md). Both RL rows in the tables above (Q-Learning and DQN) run inside the envelope.
 
 ## Training curves
 
 Greedy policy scored every 25 episodes on validation seeds [1000, 1001] (1200 ticks per profile), avg delay per vehicle (s); best checkpoint kept:
 
-- Q-Learning (seed 42): 113.1 untrained -> best 32.2 at episode 200.
-- Q-Learning (seed 7): 113.1 untrained -> best 38.1 at episode 425.
-- Q-Learning (seed 123): 113.1 untrained -> best 33.9 at episode 300.
-- DQN (seed 42): 75.1 untrained -> best 19.3 at episode 175.
-- DQN (seed 7): 72.2 untrained -> best 17.6 at episode 250.
-- DQN (seed 123): 58.5 untrained -> best 20.3 at episode 425.
+- Q-Learning (seed 42): 35.3 untrained -> best 25.5 at episode 325.
+- Q-Learning (seed 7): 35.3 untrained -> best 24.8 at episode 275.
+- Q-Learning (seed 123): 35.3 untrained -> best 24.0 at episode 300.
+- DQN (seed 42): 30.9 untrained -> best 18.2 at episode 275.
+- DQN (seed 7): 29.4 untrained -> best 18.3 at episode 250.
+- DQN (seed 123): 26.0 untrained -> best 19.5 at episode 475.
 - Fixed Timer on the same validation set: 35.2.
 - Density on the same validation set: 27.3.

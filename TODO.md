@@ -18,19 +18,19 @@
 ### Evaluation and quality
 - [x] Per-vehicle delay metrics (avg / P95 / max / ambulance)
 - [x] Experiment harness: 10-min runs × 5 profiles × 5 test seeds; RL trained from 3 seeds in parallel; per-profile results; bootstrap CI
-- [x] pytest suite (88 tests) with golden KPIs, gradient check and harness smoke test; CI on GitHub Actions
+- [x] pytest suite (91 tests) with golden KPIs, gradient check and harness smoke test; CI on GitHub Actions
 - [x] Documentation refresh (README, PROJECT_DOCUMENTATION, TODO, model card, docstrings)
 
 ## Next
 
 - [x] **RL in light/night traffic.** Fixed by rebalancing the reward scale against the
-      Huber loss (validated on held-out seeds). Since Step 8's fairness reward the DQN is
-      slightly behind Density in light traffic only (13.2 vs 11.8 s).
+      Huber loss (validated on held-out seeds). With the safety envelope (Step 9) the DQN
+      is ahead in light traffic too (5.7 vs 11.8 s).
 - [x] **DQN worst-case delay.** Wait-aware reward + per-lane long-waiter features (Step 8);
       the DQN's longest wait is now shorter than Density's. Optional max-red safety rule added.
 - [x] **Edge-case stress test + safety envelope + simulation viewer** (Step 9).
-- [ ] **Remaining edge-case tails**: simultaneous ambulances on all approaches, demand beyond
-      capacity, camera outage (worst waits 4–46 s above the best baseline).
+- [ ] **Remaining edge-case tails**: simultaneous ambulances on all approaches (84 vs 81 s) and
+      camera outage (95 vs 82 s); through a realistic camera, overload tails (trucks, beyond capacity).
 - [ ] **Visual input phase.** Camera pipeline (YOLO detection + tracking such as ByteTrack,
       lane regions per camera) implementing `perception.observe()`; calibrate
       `config/perception.py` error rates on real footage; re-test noise-aware training.

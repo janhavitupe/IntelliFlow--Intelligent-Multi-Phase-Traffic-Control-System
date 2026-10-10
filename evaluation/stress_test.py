@@ -19,7 +19,9 @@ while an InvariantMonitor checks the safety rules on EVERY tick:
 Performance (delay per vehicle, longest wait, unserved vehicles, time to
 clear a burst) is reported next to the baselines. "DQN" is the deployed
 controller (learned policy + safety envelope: no empty green, max red 90 s,
-camera-failure fallback); "DQN (raw policy)" is the learned policy alone. "Optimal in every case"
+camera-failure fallback); "DQN (raw policy)" is the learned policy alone;
+"DQN (realistic camera)" is the deployed controller seeing the junction through
+simulated camera errors with turn intent read only from vehicle heading. "Optimal in every case"
 cannot be proven for any controller; this checks the guaranteed properties
 and measures behaviour where controllers typically fail.
 
@@ -211,6 +213,7 @@ def controller_factory(name, seed=None, scenario=None):
     import run_experiments as rx
     agent = rx.load_agent("DQN", seed)
     blackout = scenario.blackout if scenario is not None else None
+    camera = name == CAMERA_DQN
     if name == RAW_DQN:                      # the learned policy alone
         safety = {"max_red": None, "serve_waiting": False}
     elif "max-red" in name:
@@ -219,7 +222,11 @@ def controller_factory(name, seed=None, scenario=None):
         safety = {}
 
     def make():
-        perception = BlackoutPerception(start=blackout[0], end=blackout[1]) if blackout else None
+        from perception import GroundTruthPerception, HeadingIntentPerception, NoisyPerception
+        base = NoisyPerception(seed=0) if camera else GroundTruthPerception()
+        perception = BlackoutPerception(base=base, start=blackout[0], end=blackout[1]) if blackout else base
+        if camera:                           # realistic camera: intent only from heading
+            perception = HeadingIntentPerception(base=perception, seed=0)
         return RLStrategy(agent=agent, perception=perception, **safety)
     return make
 
@@ -252,7 +259,8 @@ def run_scenario(scenario, factory, seed=1):
 
 
 RAW_DQN = "DQN (raw policy)"
-CONTROLLERS = ["Fixed Timer", "Density", RAW_DQN, "DQN"]
+CAMERA_DQN = "DQN (realistic camera)"        # heading-based intent + detection errors
+CONTROLLERS = ["Fixed Timer", "Density", RAW_DQN, "DQN", CAMERA_DQN]
 DQN_SEEDS = [42, 7, 123]
 
 

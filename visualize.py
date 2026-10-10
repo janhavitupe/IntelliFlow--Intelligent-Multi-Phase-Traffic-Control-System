@@ -29,7 +29,8 @@ from concurrent.futures import ProcessPoolExecutor
 from config import rl as rl_config
 from core.enums import PhaseType, SignalState, VehicleType
 from evaluation.stress_test import SCENARIOS, SCENARIO_BY_NAME, TICK, controller_factory
-from perception import LANE_ORDER
+from config import perception as perception_config
+from perception import LANE_ORDER, HeadingIntentPerception
 from simulation import Simulation
 from traffic_source.scenario_traffic_source import ScenarioTrafficSource
 
@@ -48,6 +49,9 @@ STANDARD = [
 ]
 PHASES = [pt.name for pt in PhaseType if pt != PhaseType.EMERGENCY_OVERRIDE]
 SIGNAL_CODE = {SignalState.GREEN: "g", SignalState.YELLOW: "y", SignalState.RED: "r"}
+TYPE_CODE = {VehicleType.CAR: "c", VehicleType.BIKE: "m", VehicleType.BUS: "b",
+             VehicleType.TRUCK: "t", VehicleType.AMBULANCE: "a"}
+QUEUE_TYPES_SHOWN = 12             # vehicle types recorded per lane (front of the queue)
 
 
 def _scenario_meta():
@@ -83,13 +87,33 @@ def record(job):
              for m, lane in ap.lanes.items()}
     movements = {m.movement_id: m for m in sim.intersection.all_movements()}
     strat = sim.strategy
+    if controller == "DQN":
+        # The DQN sees the junction like a real camera: turn intent only from
+        # each vehicle's heading (wraps the scenario's perception, e.g. a blackout).
+        strat.perception = HeadingIntentPerception(base=strat.perception, seed=0)
+        strat.perception.reset()
     f = {k: [] for k in ("sig", "q", "w", "amb", "phase", "avg", "maxw", "served", "queued",
-                         "override", "camera")}
+                         "override", "camera", "qt", "dep")}
     last_overrides = 0
+    # Capture which vehicles leave each lane (to animate them crossing).
+    departed = {mid: [] for mid in LANE_ORDER}
+    record_served = sim.analytics.record_served
+
+    def capture(records):
+        for movement, vehicle in records:
+            departed[movement.movement_id].append(TYPE_CODE[vehicle.vehicle_type])
+        return record_served(records)
+    sim.analytics.record_served = capture
     for tick in range(ticks):
         sim.step()
         if tick % 2:                       # record once per simulated second
             continue
+        f["dep"].append("|".join("".join(departed[mid]) for mid in LANE_ORDER))
+        for mid in LANE_ORDER:
+            departed[mid].clear()
+        f["qt"].append("|".join(
+            "".join(TYPE_CODE[v.vehicle_type] for _, v in zip(range(QUEUE_TYPES_SHOWN), lanes[mid].queue))
+            for mid in LANE_ORDER))
         sch = sim.scheduler
         f["sig"].append("".join(SIGNAL_CODE[movements[mid].signal.state] for mid in LANE_ORDER))
         f["q"].append([lanes[mid].queue_length for mid in LANE_ORDER])
@@ -124,9 +148,16 @@ def build(scenario_ids=None, open_browser=True):
     runs = {}
     for scenario_id, controller, frames in results:
         runs.setdefault(scenario_id, {})[controller] = frames
-    data = {"lanes": list(LANE_ORDER), "phases": PHASES, "controllers": CONTROLLERS,
+    from config.phases import build_phase_plan
+    from core.intersection import Intersection
+    plan = build_phase_plan(Intersection())
+    phase_lanes = [[LANE_ORDER.index(m.movement_id) for m in plan[PhaseType[p]].movements]
+                   for p in PHASES]
+    data = {"lanes": list(LANE_ORDER), "phases": PHASES, "phase_lanes": phase_lanes,
+            "controllers": CONTROLLERS,
             "scenarios": meta, "runs": runs,
-            "safety": {"max_red": rl_config.SAFETY_MAX_RED}}
+            "safety": {"max_red": rl_config.SAFETY_MAX_RED},
+            "intent_depth": perception_config.INTENT_VISIBLE_DEPTH}
     with open(TEMPLATE, encoding="utf-8") as fh:
         page = fh.read().replace("/*__DATA__*/null", json.dumps(data, separators=(",", ":")))
     # The template has no document skeleton (it is also published as a web

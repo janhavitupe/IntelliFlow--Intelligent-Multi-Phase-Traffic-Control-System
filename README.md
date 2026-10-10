@@ -21,16 +21,18 @@ Full tables, per-scenario breakdowns and confidence intervals:
 |---|---|---|---|---|---|
 | Fixed Timer | 31.0 s | 178 s | 71.2 | 1.224 veh/s | 15.6 s |
 | Density (rule-based) | 26.6 s | 142 s | 61.8 | 1.250 veh/s | 13.1 s |
-| Q-Learning | 25.3 ± 1.8 s | 130 s | 62.6 | 1.262 veh/s | 13.8 s |
-| **DQN** | **18.5 ± 0.7 s** | **105 s** | **45.6** | **1.300 veh/s** | **9.5 s** |
+| Q-Learning | 24.3 ± 1.4 s | 127 s | 60.7 | 1.266 veh/s | 12.9 s |
+| **DQN** | **18.3 ± 0.6 s** | **103 s** | **45.0** | **1.302 veh/s** | **9.5 s** |
 
-**In short:** the DQN cuts average delay by 30% versus the rule-based Density controller
-(−8.0 s per vehicle, 95% CI [−10.5, −5.8]) and by 40% versus a fixed-time signal, with a
+**In short:** the DQN cuts average delay by 31% versus the rule-based Density controller
+(−8.3 s per vehicle, 95% CI [−11.0, −5.8]) and by 41% versus a fixed-time signal, with a
 shorter worst-case wait, and it wins in all five traffic profiles. It runs inside a rule-based
 safety envelope (never green for an empty phase while vehicles wait elsewhere, a 90 s
 maximum red, fixed rotation if the camera fails). Its reward weighs every waiting vehicle by
 how long it has waited, so many long-waiting vehicles count more than one. With simulated
-camera errors it loses about 2% (18.8 s). Both RL rows include the safety envelope.
+camera errors it loses about 3% (18.9 s). Turn intent can be read the way a camera would, from
+each car's heading (drivers angle toward their exit near the stop line): with that plus the
+camera errors, 19.1 s. Both RL rows include the safety envelope.
 
 ![Delay by scenario](images/G3_delay_by_profile.png)
 
@@ -57,10 +59,11 @@ camera outage) and checks the safety rules on **every tick**. Results:
 - **Guaranteed by rules and verified on every tick of every scenario (0 violations):** only
   the active phase's lanes are green, yellow before every switch, every green 10–40 s, no
   vehicle lost, every ambulance served.
-- **Measured, not guaranteed:** the DQN has the lowest average delay in 11 of 12 edge cases
-  and is second in the overloaded one. Its longest wait is the best or between the two
-  baselines in most cases. It is above both in three (ambulances on all four approaches at
-  once, demand beyond capacity, the camera outage), by 4–46 s.
+- **Measured, not guaranteed:** the DQN has the lowest average delay in 9 of the 11
+  non-empty edge cases and is second in the other two. Its longest wait is the best or between
+  the two baselines everywhere except two cases: ambulances on all four approaches at once
+  (84 vs 81 s) and the camera outage (95 vs 82 s). Seen through a realistic camera (detection
+  errors, intent read from heading) it stays safe, with longer worst waits under overload.
 - No controller can be proven optimal in every case. The learned policy is kept inside a
   rule-based envelope so its failures are bounded: without it, a lone car at an empty
   junction waited 332 s; with it, 14 s.
@@ -73,7 +76,7 @@ pip install -r requirements.txt     # numpy, matplotlib, pytest
 python main.py                      # live console simulation (Fixed Timer, 100 ticks)
 python run_experiments.py           # train RL (3 seeds x 2 agents, parallel) + evaluate all (~3 min)
 python run_experiments.py --use-saved   # re-evaluate saved models only (~10 s)
-python -m pytest                    # 88 tests (~40 s)
+python -m pytest                    # 91 tests (~40 s)
 python visualize.py                 # build and open the simulation viewer
 python -m evaluation.stress_test    # edge cases + safety invariants -> results/stress_test.md
 ```

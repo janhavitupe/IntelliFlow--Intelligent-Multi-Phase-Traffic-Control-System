@@ -110,3 +110,37 @@ def test_training_env_runs_without_the_safety_envelope():
     env = TrafficRLEnv(profile_key="NORMAL_TRAFFIC", seed=1)
     env.reset()
     assert env.strategy.max_red is None and env.strategy.serve_waiting is False
+
+
+# ---------------------------------------------------------------- heading-based intent
+
+def test_heading_intent_reads_only_the_front_of_turning_queues(intersection):
+    from perception import HeadingIntentPerception
+    for i in range(5):                                         # 5 left-turners, head waited longest
+        add(intersection, "North", car(waiting=50.0 - i), MovementType.LEFT)
+    add(intersection, "North", car(waiting=10.0))              # 1 straight
+    obs = HeadingIntentPerception(visible_depth=3, misread_rate=0.0).observe(intersection)
+    assert obs.lane("North_LEFT").waits == (50.0, 49.0, 48.0)  # front 3 angled: intent visible
+    # the 2 turners further back still face straight, so they count as straight demand
+    assert obs.lane("North_STRAIGHT").waits == (47.0, 46.0, 10.0)
+    assert obs.approach_count("North") == 6                    # nothing lost or added
+
+
+def test_heading_intent_misreads_angled_vehicles_at_the_configured_rate(intersection):
+    from perception import HeadingIntentPerception
+    for _ in range(3):
+        add(intersection, "East", car(waiting=20.0), MovementType.RIGHT)
+    reader = HeadingIntentPerception(seed=1, visible_depth=3, misread_rate=0.2)
+    misread = sum(3 - reader.observe(intersection).lane("East_RIGHT").count for _ in range(500))
+    assert 0.15 < misread / 1500 < 0.25
+
+
+def test_heading_intent_composes_with_camera_noise(intersection):
+    from perception import HeadingIntentPerception, NoisyPerception
+    for _ in range(8):
+        add(intersection, "West", car(waiting=30.0), MovementType.UTURN)
+    reader = HeadingIntentPerception(base=NoisyPerception(seed=2, miss_rate=0.0, false_positive_rate=0.0,
+                                                          wait_error=0.0, track_loss_rate=0.0),
+                                     visible_depth=3, misread_rate=0.0)
+    obs = reader.observe(intersection)
+    assert obs.lane("West_UTURN").count == 3 and obs.lane("West_STRAIGHT").count == 5

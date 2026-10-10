@@ -29,3 +29,14 @@ NOISY_WAIT_ERROR = 0.10
 # Probability that a vehicle's track was lost and re-acquired, so its wait is
 # underestimated (only a random fraction of the true wait is known).
 NOISY_TRACK_LOSS_RATE = 0.05
+
+# ---------------------------------------------------------------------------
+# Turn intent read from vehicle heading (HeadingIntentPerception)
+# ---------------------------------------------------------------------------
+# A camera cannot see where a driver wants to go, only which way the car faces.
+# Drivers who will turn angle their vehicle toward the exit as they near the
+# stop line, so only the front of each queue shows its intent.
+# How many vehicles at the front of a lane are angled enough to read intent:
+INTENT_VISIBLE_DEPTH = 3
+# Probability that an angled (turning) vehicle is still read as going straight:
+INTENT_MISREAD_RATE = 0.05

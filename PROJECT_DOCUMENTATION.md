@@ -335,6 +335,17 @@ tracking gives how long each has been stopped. Two sources exist today:
   wait-estimate error, 5% lost-and-re-acquired tracks (wait underestimated). These rates
   are **assumptions** in `config/perception.py`, to be calibrated on real footage.
 
+- `HeadingIntentPerception`: turn intent read from vehicle heading, as a camera would. A
+  camera can't know where a driver wants to go, only which way the car faces. Drivers angle
+  toward their exit near the stop line, so for each turning lane only the first 3 vehicles show
+  their intent (5% of those are still read as straight); turning vehicles further back face
+  straight and are counted as straight demand. It wraps any other source, so it combines with
+  `NoisyPerception`.
+
+Robustness of the deployed DQN on the test seeds (no retraining): perfect information 18.3 s;
+heading intent 18.6 s; camera noise 18.9 s; heading intent + camera noise 19.1 s (Density,
+with perfect information: 26.6 s). The simulation viewer runs the DQN with heading intent.
+
 A future camera pipeline implements the same `observe()` contract; the controller doesn't change.
 The reward still uses true waits, because it's only needed in training, in simulation.
 
@@ -359,8 +370,9 @@ them off, so the agent is only ever credited for its own actions.
 
 They were chosen on the edge-case stress test (§10.1) with a rule written down in advance. The
 raw policy, for comparison: a lone car at an empty junction waited 332 s; with the envelope,
-14 s. The envelope also improves the standard benchmark (average delay 18.7 → 18.5 s,
-longest wait 130 → 105 s, light traffic 13.2 → 5.7 s), at a small cost in throughput.
+14 s. The envelope also improves the standard benchmark (same trained models, raw policy →
+with envelope: average delay 19.0 → 18.3 s, longest wait 140 → 103 s; light traffic 5.7 s vs
+Density's 11.8 s), at a small cost in throughput (1.329 → 1.302 veh/s).
 
 ---
 
@@ -412,15 +424,16 @@ synchronised junction views, live stats, a queue chart and an end-of-run table.
 
 Current numbers: [results/model_cards.md](results/model_cards.md). What they show:
 
-- **The deployed DQN is the best controller overall**: about 30% less average delay than
-  Density (−8.0 s, 95% CI [−10.5, −5.8]), a shorter worst-case wait (105 vs 142 s), a better
+- **The deployed DQN is the best controller overall**: about 31% less average delay than
+  Density (−8.3 s, 95% CI [−11.0, −5.8]), a shorter worst-case wait (103 vs 142 s), a better
   95th-percentile wait, shorter queues and lower ambulance delay. It wins in all five
   standard profiles.
-- **Edge cases**: lowest average delay in 11 of 12; worst-case wait above both baselines in
-  three (simultaneous ambulances, demand beyond capacity, camera outage). Safety invariants:
-  0 violations.
+- **Edge cases**: lowest average delay in 9 of the 11 non-empty scenarios (second in the
+  other two); worst-case wait above both baselines in two (simultaneous ambulances 84 vs 81 s,
+  camera outage 95 vs 82 s). Safety invariants: 0 violations, including through a realistic
+  camera (detection errors + heading-based intent).
 - **Robust to camera errors**: with simulated detection and tracking errors, average delay
-  rises about 2% (18.5 → 18.8 s).
+  rises about 3% (18.3 → 18.9 s); with turn intent read from heading as well, 19.1 s.
 - **The fairness trade-off is explicit**: the wait-aware reward and the safety envelope
   shorten the longest waits at a small cost in throughput.
 - **Tabular Q-learning is behind Fixed Timer.** Its coarse LOW/MED/HIGH state can't tell
@@ -435,7 +448,7 @@ Current numbers: [results/model_cards.md](results/model_cards.md). What they sho
 
 ## 12. Testing
 
-`python -m pytest` runs 88 tests (~40 s), also in CI on every push and pull request.
+`python -m pytest` runs 91 tests (~40 s), also in CI on every push and pull request.
 
 | Area | Examples |
 |---|---|
@@ -498,8 +511,9 @@ print_comparison(evaluate_strategies({"fixed_timer": FixedTimerStrategy(),
   camera pipeline (detection + tracking) and error rates measured on real footage don't yet.
 - **Not provably optimal**: no controller can be. Safety properties are rule-enforced and
   checked; performance is measured on the standard benchmark and the edge cases.
-- **Worst-case waits in three edge cases** (simultaneous ambulances on all approaches,
-  demand beyond capacity, camera outage) are 4–46 s longer than the best baseline's.
+- **Worst-case waits in two edge cases** (simultaneous ambulances on all approaches, camera
+  outage) are 3–13 s longer than the worse baseline's; through a realistic camera, worst waits
+  also grow under overload (all trucks, demand beyond capacity).
 - **RUSH_HOUR** is over capacity, with frequent ambulances (§4).
 - **No conflict-matrix test**: the phase plan is pinned to the official diagrams, but
   movement compatibility isn't independently verified (no authoritative conflict table in the code).
