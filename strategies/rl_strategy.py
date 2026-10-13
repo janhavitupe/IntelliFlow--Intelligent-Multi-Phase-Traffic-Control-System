@@ -96,7 +96,8 @@ class RLStrategy(BaseStrategy):
     """
 
     def __init__(self, agent=None, min_green=None, extension=None, max_green=None,
-                 perception=None, max_red=_CONFIG, serve_waiting=_CONFIG):
+                 perception=None, max_red=_CONFIG, serve_waiting=_CONFIG,
+                 dominance_margin=_CONFIG):
         super().__init__(name="rl")
         self.gap_out = True
         self.agent = agent
@@ -107,6 +108,8 @@ class RLStrategy(BaseStrategy):
         self.max_red = rl_config.SAFETY_MAX_RED if max_red is _CONFIG else max_red
         self.serve_waiting = (rl_config.SAFETY_SERVE_WAITING if serve_waiting is _CONFIG
                               else serve_waiting)
+        self.dominance_margin = (rl_config.SAFETY_DOMINANCE_MARGIN if dominance_margin is _CONFIG
+                                 else dominance_margin)
         self._phases = all_phase_types()
         self._phase_lanes = None
         self.reset()
@@ -137,6 +140,9 @@ class RLStrategy(BaseStrategy):
         self.decisions = 0
         self.shield_overrides = 0
         self.empty_green_overrides = 0
+        self.dominance_overrides = 0
+        self.clear_misses = 0          # agent's own pick < half as urgent as the best phase
+        self.last_executed = None
         self.fallback_decisions = 0
 
     # ------------------------------------------------------------------
@@ -194,6 +200,13 @@ class RLStrategy(BaseStrategy):
         self.decisions += 1
         return self._shield(action, intersection, time)
 
+    def _phase_urgency(self, obs):
+        """Per phase: sum of 1 + max(0, wait - threshold)/slope over the vehicles it would serve."""
+        threshold, slope = rl_config.WAIT_PENALTY_THRESHOLD, rl_config.WAIT_PENALTY_SLOPE or 1e9
+        lane_cost = {lane.movement_id: sum(1 + max(0.0, w - threshold) / slope for w in lane.waits)
+                     for lane in obs.lanes}
+        return [sum(lane_cost[l] for l in lanes) for lanes in self._phase_lanes]
+
     def _fallback_action(self, current_phase):
         """Fixed-order rotation: the phase after the current one."""
         if current_phase is None or current_phase.phase_type not in self._phases:
@@ -202,10 +215,16 @@ class RLStrategy(BaseStrategy):
         return (self._phases.index(current_phase.phase_type) + 1) % len(self._phases)
 
     def _shield(self, action, intersection, time):
-        """Safety envelope: maximum red first, then no empty green."""
+        """Safety envelope: maximum red, clearly-better phase (if on), no empty green."""
         obs = self.last_observation
         if obs is None or not obs.available:
+            self.last_executed = action
             return action
+        action = self._shield_rules(action, obs, intersection, time)
+        self.last_executed = action
+        return action
+
+    def _shield_rules(self, action, obs, intersection, time):
         if self._phase_lanes is None:
             from config.phases import build_phase_plan
             self._phase_lanes = [
@@ -223,6 +242,16 @@ class RLStrategy(BaseStrategy):
                 best = max(range(len(served)), key=lambda i: served[i])
                 if best != action:
                     self.shield_overrides += 1
+                return best
+
+        urgency = self._phase_urgency(obs)
+        if max(urgency) > 0 and urgency[action] < 0.5 * max(urgency):
+            self.clear_misses += 1
+        if self.dominance_margin is not None:
+            best = max(range(len(urgency)), key=lambda i: urgency[i])
+            clearly_better = urgency[best] >= (1 + self.dominance_margin) * urgency[action]
+            if best != action and urgency[best] > 0 and clearly_better:
+                self.dominance_overrides += 1
                 return best
 
         if self.serve_waiting:

@@ -123,9 +123,11 @@ class TrafficRLEnv:
         self.intersection = Intersection()
         perception = (self.perception_factory(self.seed)
                       if self.perception_factory is not None else None)
-        # Safety envelope off: during training every executed action must be
-        # the agent's own, or Q-learning would credit it for rule overrides.
-        self.strategy = RLStrategy(perception=perception, max_red=None, serve_waiting=False)
+        # Deployment safety envelope off during training. The optional training
+        # teacher (TRAIN_TEACHER_MARGIN) may replace a clearly worse pick; step()
+        # reports the action actually run so learners credit the right one.
+        self.strategy = RLStrategy(perception=perception, max_red=None, serve_waiting=False,
+                                   dominance_margin=rl_config.TRAIN_TEACHER_MARGIN)
         self.scheduler = TrafficScheduler(
             self.intersection,
             self.strategy,
@@ -183,6 +185,9 @@ class TrafficRLEnv:
         info = {
             "truncated": done,
             "duration": (self.tick - start_tick) * self.tick_interval,
+            # The phase actually run (differs from `action` only when the training
+            # teacher replaced it); learners store this one.
+            "executed_action": self.strategy.last_executed,
         }
         return self.strategy.last_obs, reward, done, info
 

@@ -133,10 +133,13 @@ def _train(agent, use_discrete, n_episodes, profiles, episode_length, seed, verb
             # Semi-MDP discount: longer steps discount the future more.
             discount = rl_config.GAMMA_PER_SECOND ** info["duration"]
 
+            executed = info.get("executed_action", action)
+            if executed is None:
+                executed = action
             if use_discrete:
-                agent.update(state, action, reward, next_state, terminal, discount)
+                agent.update(state, executed, reward, next_state, terminal, discount)
             else:
-                agent.store(state, action, reward, next_state, terminal, discount)
+                agent.store(state, executed, reward, next_state, terminal, discount)
 
             state = next_state
             ep_reward += reward

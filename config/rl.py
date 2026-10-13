@@ -61,7 +61,11 @@ WAIT_PENALTY_SLOPE = 30.0           # chosen on validation (Step 8), see dev_not
 LANE_QUEUE_NORM = 10.0     # vehicles; per-lane count and long-waiter scale
 WAIT_NORM = 60.0           # seconds; mean / longest wait feature scale
 MAX_GREEN_NORM = 40.0      # elapsed-green feature scale (= MAX_GREEN)
-OBS_DIM = 16 * 4 + 6 + 1      # = 71
+# Optional per-phase urgency inputs (Step 11): one per phase, the urgency of the vehicles it
+# would serve (same measure as the reward's cost rate), / PHASE_URGENCY_NORM, clipped at 3.
+PHASE_URGENCY_FEATURES = False
+PHASE_URGENCY_NORM = 20.0
+OBS_DIM = 16 * 4 + 6 + 1 + (6 if PHASE_URGENCY_FEATURES else 0)
 
 # Tabular Q discretization.
 LOW_THRESHOLD = 5
@@ -98,6 +102,14 @@ DQN_VALUE_RESCALING = False
 # Chosen in Step 9 on the edge-case stress test (evaluation/stress_test.py).
 SAFETY_MAX_RED = 90.0          # seconds a lane with vehicles may stay red
 SAFETY_SERVE_WAITING = True    # never give green to an empty phase while others wait
+# "Clearly better phase": if some phase's urgency (sum over the vehicles it would serve of
+# 1 + max(0, wait - 60)/30, the reward's cost rate) is >= (1 + margin) x the chosen phase's,
+# use it instead. None = off. Chosen in Step 11 on validation seeds.
+SAFETY_DOMINANCE_MARGIN = None
+# Training-only "teacher" (Step 11): while training, a clearly better phase (margin below)
+# replaces the agent's pick and the transition is stored with the action actually run.
+# None = off. Never active at deployment.
+TRAIN_TEACHER_MARGIN = None
 DQN_VALUE_RESCALING_EPS = 1e-2
 
 # ---------------------------------------------------------------------------

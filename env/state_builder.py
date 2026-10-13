@@ -43,8 +43,16 @@ class ObservationBuilder:
     def __init__(self):
         self.phase_types = all_phase_types()
         self.phase_index = {pt.name: i for i, pt in enumerate(self.phase_types)}
-        self.size = len(LANE_ORDER) * FEATURES_PER_LANE + len(self.phase_types) + 1
+        self.urgency = rl_config.PHASE_URGENCY_FEATURES
+        self.size = (len(LANE_ORDER) * FEATURES_PER_LANE + len(self.phase_types) + 1
+                     + (len(self.phase_types) if self.urgency else 0))
         assert self.size == rl_config.OBS_DIM
+        if self.urgency:
+            from config.phases import build_phase_plan
+            from core.intersection import Intersection
+            plan = build_phase_plan(Intersection())
+            self.phase_lane_idx = [[LANE_ORDER.index(m.movement_id) for m in plan[pt].movements]
+                                   for pt in self.phase_types]
 
     def build(self, observation, active_phase, elapsed_in_phase):
         """
@@ -64,8 +72,17 @@ class ObservationBuilder:
             obs[base + 2] = min(lane.max_wait / rl_config.WAIT_NORM, 3.0)
             obs[base + 3] = lane.long_waiters(long_wait) / rl_config.LANE_QUEUE_NORM
         n_lane = len(LANE_ORDER) * FEATURES_PER_LANE
-        obs[n_lane:n_lane + len(self.phase_types)] = self._phase_one_hot(active_phase)
-        obs[-1] = elapsed_in_phase / rl_config.MAX_GREEN_NORM
+        n_ph = len(self.phase_types)
+        obs[n_lane:n_lane + n_ph] = self._phase_one_hot(active_phase)
+        obs[n_lane + n_ph] = elapsed_in_phase / rl_config.MAX_GREEN_NORM
+        if self.urgency:
+            threshold = rl_config.WAIT_PENALTY_THRESHOLD
+            slope = rl_config.WAIT_PENALTY_SLOPE or 1e9
+            lane_cost = [sum(1 + max(0.0, w - threshold) / slope for w in lane.waits)
+                         for lane in observation.lanes]
+            for p, idx in enumerate(self.phase_lane_idx):
+                obs[n_lane + n_ph + 1 + p] = min(sum(lane_cost[i] for i in idx)
+                                                 / rl_config.PHASE_URGENCY_NORM, 3.0)
         return obs
 
     def _phase_one_hot(self, active_phase):
