@@ -71,6 +71,7 @@ canvas.junction { width: 100%; max-width: 100%; aspect-ratio: 1; display: block;
 .ph { border: 1px solid var(--line); border-radius: 8px; padding: 6px; display: grid; gap: 4px; justify-items: center; }
 .ph canvas { width: 100%; aspect-ratio: 1; display: block; border-radius: 6px; }
 .ph b { font-family: var(--font-display); font-weight: 700; letter-spacing: .04em; }
+.ph .pdesc { color: var(--muted); font-size: .78rem; text-align: center; line-height: 1.2; }
 .ph .who { display: flex; gap: 4px; min-height: 14px; flex-wrap: wrap; justify-content: center; }
 .ph .who i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 #chart { width: 100%; height: 190px; display: block; }
@@ -92,7 +93,7 @@ td.best { color: var(--go); font-weight: 600; }
 
 <div class="wrap">
   <header>
-    <div class="cap">IntelliFlow · 4-way junction · 10-phase plan · vehicles drive on the left</div>
+    <div class="cap">IntelliFlow · 4-way junction · 6 conflict-free phases · vehicles drive on the left</div>
     <h1>Junction <span>Replay</span></h1>
     <p class="sub">Three traffic-light controllers handle exactly the same arriving traffic. Watch the
       lane arrows change colour and the vehicles drive through when their lane turns green. Every frame
@@ -119,10 +120,12 @@ td.best { color: var(--go); font-weight: 600; }
   <section class="views" id="views" aria-label="Junctions"></section>
 
   <section class="card">
-    <h3>The 10 phases</h3>
+    <h3>The phases</h3>
     <p class="note">A phase is a set of lanes that may go at the same time without crossing each other.
-      Each diagram shows the paths a phase lets cars take. The coloured squares under a phase show which
-      controller is running it right now.</p>
+      Left turns hug the kerb and cross nobody, so every phase includes all four. Right turns cross the
+      oncoming straight, so each approach gets its own phase for them. Between phases every light shows
+      yellow and then all red for 2 s each, so the junction is clear before crossing traffic starts. The
+      coloured squares under a phase show which controller is running it right now.</p>
     <div class="phases" id="phases"></div>
   </section>
 
@@ -323,19 +326,20 @@ function drawJunction(view, run, t) {
     ctx.fillText(ap.toUpperCase(), 0, 0); ctx.restore();
     ctx.restore();
   });
-  const p = run.phase[i];
-  const label = p === 10 ? "EMERGENCY" : p < 0 ? "ALL RED" : "PHASE " + (p + 1);
-  ctx.font = `700 ${lw * (p === 10 ? 0.5 : 0.6)}px ${css("--font-display")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const p = run.phase[i], EMERG = DATA.phases.length;
+  const allRed = !/[gy]/.test(sig);
+  const label = allRed ? "ALL RED" : p === EMERG ? "EMERGENCY" : p < 0 ? "ALL RED" : "PHASE " + (p + 1);
+  ctx.font = `700 ${lw * (p === EMERG && !allRed ? 0.5 : 0.6)}px ${css("--font-display")}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
   const tw = ctx.measureText(label).width;
   ctx.fillStyle = "rgba(0,0,0,.45)"; roundRect(ctx, c - tw / 2 - lw * 0.25, c - lw * 0.42, tw + lw * 0.5, lw * 0.84, lw * 0.2); ctx.fill();
-  ctx.fillStyle = p === 10 ? pal.stop : "#ffffff"; ctx.fillText(label, c, c + lw * 0.03);
+  ctx.fillStyle = p === EMERG && !allRed ? pal.stop : "#ffffff"; ctx.fillText(label, c, c + lw * 0.03);
 }
 
 // ---------------- phase map ----------------
 const phasesEl = document.getElementById("phases");
 const phaseCards = DATA.phases.map((name, pi) => {
   const d = document.createElement("div"); d.className = "ph";
-  d.innerHTML = `<canvas aria-label="Phase ${pi + 1} paths"></canvas><b>PHASE ${pi + 1}</b><div class="who"></div>`;
+  d.innerHTML = `<canvas aria-label="Phase ${pi + 1} paths"></canvas><b>PHASE ${pi + 1}</b><small class="pdesc">${DATA.phase_desc[pi]}</small><div class="who"></div>`;
   phasesEl.append(d); return { el: d, canvas: d.querySelector("canvas"), who: d.querySelector(".who") };
 });
 function drawPhaseMap() {
@@ -443,7 +447,7 @@ function layout() {
 }
 function chips(view, run, i) {
   const out = [];
-  if (run.phase[i] === 10) out.push(["Ambulance priority", "stop"]);
+  if (run.phase[i] === DATA.phases.length) out.push(["Ambulance priority", "stop"]);
   if (run.camera && !run.camera[i]) out.push(["Camera down · fixed rotation", "caution"]);
   let recent = false; for (let k = Math.max(0, i - 3); k <= i; k++) if (run.override[k]) recent = true;
   if (recent && run.camera[i]) out.push(["Safety rule acted", "go"]);

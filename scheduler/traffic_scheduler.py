@@ -26,7 +26,7 @@ Emergency preemption:
 
     The emergency phase stays active until the ambulance has cleared the
     intersection (configurable fail-safe timeout as a guard). Afterward,
-    normal 10-phase scheduling resumes unchanged.
+    normal scheduling resumes unchanged.
 """
 from core.enums import PhaseType, SignalState
 from config import phases as phase_config
@@ -62,10 +62,15 @@ class TrafficScheduler:
         emergency_yellow_duration: float = None,
         emergency_max_timeout: float = None,
         emergency_cooldown: float = None,
+        all_red_duration: float = None,
     ):
         self.intersection = intersection
         self.strategy = strategy
         self.yellow_duration = yellow_duration
+        self.all_red_duration = (all_red_duration if all_red_duration is not None
+                                 else sim_config.ALL_RED_TIME)
+        self.gap_out_min_green = sim_config.GAP_OUT_MIN_GREEN
+        self.gap_out_time = sim_config.GAP_OUT_TIME
 
         # Emergency timing - resolved from config when not provided, so no
         # hardcoded values are scattered through the code.
@@ -90,7 +95,10 @@ class TrafficScheduler:
 
         self.current_phase = None
         self.green_remaining = 0.0
-        self._in_yellow = False
+        self._in_yellow = False          # True during yellow AND the all-red after it
+        self._all_red = False
+        self._green_elapsed = 0.0
+        self._empty_for = 0.0            # seconds the served lanes have been empty
 
         # Emergency preemption state.
         self._emergency_approach = None      # approach being served, or None
@@ -129,6 +137,9 @@ class TrafficScheduler:
         self.current_phase.activate()
         self.green_remaining = green_seconds
         self._in_yellow = False
+        self._all_red = False
+        self._green_elapsed = 0.0
+        self._empty_for = 0.0
 
     def switch_to_emergency(self, approach_name: str, green_seconds: float = 15.0):
         """
@@ -235,16 +246,20 @@ class TrafficScheduler:
         self._emergency_approach = approach_name
         self._emergency_active_remaining = self.emergency_max_timeout
 
-        if self.current_phase is not None and self.current_phase.phase_type != PhaseType.EMERGENCY_OVERRIDE:
-            # Suspend normal scheduling and interrupt the active phase with a
-            # short yellow clearance so vehicles can clear the intersection.
-            self.current_phase.start_yellow_transition()
-            self._in_yellow = True
-            self.yellow_remaining = self.emergency_yellow_duration
+        if self.current_phase is None:
+            # Nothing green and nothing clearing: go straight to emergency.
+            self._activate_emergency_green()
+        elif self._in_yellow:
+            # A clearance (yellow + all-red) is already running: finish it.
             self._emergency_clearance_remaining = self.yellow_remaining
         else:
-            # Nothing green / already transitioning: go straight to emergency.
-            self._activate_emergency_green()
+            # Interrupt the green with yellow, then all-red, so vehicles that
+            # entered can clear the intersection before the emergency green.
+            self.current_phase.start_yellow_transition()
+            self._in_yellow = True
+            self._all_red = False
+            self._emergency_clearance_remaining = (self.emergency_yellow_duration
+                                                   + self.all_red_duration)
 
     def _activate_emergency_green(self):
         """
@@ -266,6 +281,7 @@ class TrafficScheduler:
         self.current_phase = emergency_phase
         self.current_phase.activate()
         self._in_yellow = False
+        self._all_red = False
         self.green_remaining = self.emergency_max_timeout
         self._emergency_active_remaining = self.emergency_max_timeout
 
@@ -284,8 +300,12 @@ class TrafficScheduler:
              normal scheduling.
         """
         if self._in_yellow:
-            # Clearance phase.
+            # Clearance phase: yellow, then all-red, then emergency green.
             self._emergency_clearance_remaining -= delta
+            self.yellow_remaining = self._emergency_clearance_remaining
+            if not self._all_red and self._emergency_clearance_remaining <= self.all_red_duration:
+                self.current_phase.deactivate()
+                self._all_red = True
             if self._emergency_clearance_remaining <= 0:
                 # Clearance complete: all movements now RED, then emergency green.
                 self._activate_emergency_green()
@@ -307,16 +327,17 @@ class TrafficScheduler:
         """
         Terminate the emergency override and return to normal scheduling.
 
-        The emergency phase is red out and current_phase is cleared. The next
-        update() will resume the normal PHASE_1..PHASE_10 rotation via the
-        strategy - the official 10-phase controller is never modified.
+        The emergency green ends like any other green: yellow, then all-red,
+        then the strategy picks the next normal phase.
         """
-        if self.current_phase is not None:
-            self.current_phase.deactivate()
-        self.current_phase = None
         self._emergency_approach = None
-        self._in_yellow = False
         self.green_remaining = 0.0
+        if self.current_phase is None:
+            return
+        self.current_phase.start_yellow_transition()
+        self._in_yellow = True
+        self._all_red = False
+        self.yellow_remaining = self.yellow_duration + self.all_red_duration
 
     # -------- Tick / timing --------
 
@@ -344,7 +365,7 @@ class TrafficScheduler:
             self._begin_emergency(emergency_approach)
             return
 
-        # 3. Normal scheduling (official PHASE_1..PHASE_10).
+        # 3. Normal scheduling (the normal phases in config/phases.py).
         if self.current_phase is None:
             # No phase active yet - start one.
             next_type, green = self.select_next_phase()
@@ -357,15 +378,21 @@ class TrafficScheduler:
             movement.signal.update(delta)
 
         if self._in_yellow:
-            # Yellow transition: after yellow_duration, switch to next phase.
+            # Yellow, then all-red, then the next phase.
             self.yellow_remaining -= delta
+            if not self._all_red and self.yellow_remaining <= self.all_red_duration:
+                self.current_phase.deactivate()
+                self._all_red = True
             if self.yellow_remaining <= 0:
                 next_type, green = self.select_next_phase()
                 if next_type is not None:
                     self.switch_phase(next_type, green or 12.0)
             return
 
-        # In green: count down remaining green time.
+        # In green: gap-out check, then count down remaining green time.
+        self._green_elapsed += delta
+        if getattr(self.strategy, "gap_out", False) and self._gaps_out(delta):
+            self.green_remaining = min(self.green_remaining, delta)
         self.green_remaining -= delta
         if self.green_remaining <= 0:
             # Give the strategy a chance to extend the green.
@@ -376,11 +403,27 @@ class TrafficScheduler:
                 return
             if extension:
                 self.green_remaining += extension
+                self._empty_for = 0.0          # a new gap must build up before the next gap-out
                 return
-            # Begin yellow transition.
+            # Begin the clearance: yellow, then all-red.
             self.current_phase.start_yellow_transition()
             self._in_yellow = True
-            self.yellow_remaining = self.yellow_duration
+            self._all_red = False
+            self.yellow_remaining = self.yellow_duration + self.all_red_duration
+
+    def _gaps_out(self, delta):
+        """
+        Actuated gap-out: True once the green has lasted GAP_OUT_MIN_GREEN,
+        every lane it serves has been empty for GAP_OUT_TIME, and vehicles
+        are waiting somewhere else.
+        """
+        if all(m.lane.is_empty for m in self.current_phase.movements):
+            self._empty_for += delta
+        else:
+            self._empty_for = 0.0
+        return (self._green_elapsed >= self.gap_out_min_green
+                and self._empty_for >= self.gap_out_time
+                and self.intersection.total_queue_length() > 0)
 
 # -------- Introspection --------
 

@@ -57,7 +57,7 @@ PERCENTILE_BUCKETS = {
     "median": ["HIGH", "HIGH", "LOW", "LOW"],
 }
 
-# Density class -> numeric weight used when scoring the 10 phases.
+# Density class -> numeric weight used when scoring the phases.
 #   HIGH = 3, MEDIUM = 2, LOW = 1
 DENSITY_WEIGHTS = {
     "HIGH": 3,
@@ -66,7 +66,7 @@ DENSITY_WEIGHTS = {
 }
 
 # ---------------------------------------------------------------------------
-# Phase scoring (ALL 10 phases are scored every cycle)
+# Phase scoring (ALL phases are scored every cycle)
 #
 #   Phase Score = sum over approaches of (
 #                    Approach Weight x Phase Coverage
@@ -96,13 +96,11 @@ IGNORE_EMPTY_APPROACHES = True  # empty approaches should not be boosted
 # ---------------------------------------------------------------------------
 # Phase recency (anti-phase-starvation)
 #
-# The preserved 10-phase architecture contains some phases whose movement set
-# is a strict subset of another phase (e.g. PHASE_1 movements are a subset of
-# PHASE_8 with lower West coverage). A purely coverage-based score would never
-# select such dominated phases, making them unreachable.
+# A purely coverage-based score can keep picking the same few phases and never
+# reach the others (e.g. a through phase may always out-score an approach
+# phase), leaving some movements, such as right turns, unserved.
 #
-# To guarantee every normal phase remains reachable (and the full 10-phase
-# controller is actually utilized), each phase tracks how many consecutive
+# To guarantee every normal phase remains reachable, each phase tracks how many consecutive
 # scheduling cycles it has NOT been selected. When a phase's recency reaches
 # MAX_PHASE_STARVATION_CYCLES, it receives a bonus added to its score. The
 # bonus is PHASE_RECENCY_BONUS x RECENCY, so it GROWS the longer a phase goes

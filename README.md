@@ -7,7 +7,9 @@ seeded traffic, with ambulance preemption handled by safety rules that no learne
 policy can override.
 
 - **16 movements**: 4 approaches × (left, straight, right, U-turn), left-hand traffic.
-- **The official 10-phase signal plan**, plus a dynamic emergency phase per approach.
+- **A 6-phase signal plan that is conflict-free by construction** (derived from the movements'
+  paths and re-checked by the tests), with 2 s all-red clearance between phases, plus a
+  dynamic emergency phase per approach.
 - **5 traffic scenarios**: light, normal, rush hour (over capacity), night (truck-heavy), and a time-varying custom day.
 - **Deterministic and seeded**: every reported number is reproducible from the code.
 
@@ -19,20 +21,20 @@ Full tables, per-scenario breakdowns and confidence intervals:
 
 | Controller | Avg delay / vehicle | Longest wait | Avg queue | Throughput | Ambulance delay |
 |---|---|---|---|---|---|
-| Fixed Timer | 31.0 s | 178 s | 71.2 | 1.224 veh/s | 15.6 s |
-| Density (rule-based) | 26.6 s | 142 s | 61.8 | 1.250 veh/s | 13.1 s |
-| Q-Learning | 24.3 ± 1.4 s | 127 s | 60.7 | 1.266 veh/s | 12.9 s |
-| **DQN** | **18.3 ± 0.6 s** | **103 s** | **45.0** | **1.302 veh/s** | **9.5 s** |
+| Fixed Timer | 35.1 s | 201 s | 72.4 | 1.236 veh/s | 17.0 s |
+| Density (rule-based) | 26.0 s | 125 s | 66.0 | 1.249 veh/s | 16.7 s |
+| Q-Learning | 23.6 ± 0.8 s | 119 s | 60.2 | 1.266 veh/s | 14.3 s |
+| **DQN** | **20.8 ± 0.1 s** | **112 s** | **52.6** | **1.284 veh/s** | **11.9 s** |
 
-**In short:** the DQN cuts average delay by 31% versus the rule-based Density controller
-(−8.3 s per vehicle, 95% CI [−11.0, −5.8]) and by 41% versus a fixed-time signal, with a
-shorter worst-case wait, and it wins in all five traffic profiles. It runs inside a rule-based
+**In short:** the DQN cuts average delay by 20% versus the rule-based Density controller
+(−5.2 s per vehicle, 95% CI [−8.2, −2.6]) and by 41% versus a fixed-time signal, with a
+shorter worst-case wait, and it is best in all five traffic profiles. It runs inside a rule-based
 safety envelope (never green for an empty phase while vehicles wait elsewhere, a 90 s
 maximum red, fixed rotation if the camera fails). Its reward weighs every waiting vehicle by
 how long it has waited, so many long-waiting vehicles count more than one. With simulated
-camera errors it loses about 3% (18.9 s). Turn intent can be read the way a camera would, from
+camera errors it loses about 4% (21.7 s). Turn intent can be read the way a camera would, from
 each car's heading (drivers angle toward their exit near the stop line): with that plus the
-camera errors, 19.1 s. Both RL rows include the safety envelope.
+camera errors, 21.7 s. Both RL rows include the safety envelope.
 
 ![Delay by scenario](images/G3_delay_by_profile.png)
 
@@ -56,14 +58,16 @@ ambulance stuck behind a queue, an ambulance every 20 s, demand 30% above capaci
 camera outage) and checks the safety rules on **every tick**. Results:
 [results/stress_test.md](results/stress_test.md).
 
-- **Guaranteed by rules and verified on every tick of every scenario (0 violations):** only
-  the active phase's lanes are green, yellow before every switch, every green 10–40 s, no
-  vehicle lost, every ambulance served.
-- **Measured, not guaranteed:** the DQN has the lowest average delay in 9 of the 11
-  non-empty edge cases and is second in the other two. Its longest wait is the best or between
-  the two baselines everywhere except two cases: ambulances on all four approaches at once
-  (84 vs 81 s) and the camera outage (95 vs 82 s). Seen through a realistic camera (detection
-  errors, intent read from heading) it stays safe, with longer worst waits under overload.
+- **Guaranteed by rules and verified on every tick of every scenario (0 violations):** no
+  phase lets crossing paths go together (checked geometrically), only the active phase's lanes
+  are green, yellow and then all-red before every switch, every green 5–40 s, no vehicle lost,
+  every ambulance served.
+- **Measured, not guaranteed:** the DQN has the lowest average delay in 7 of the 11
+  non-empty edge cases. Its longest wait is above both baselines in four: a sudden surge
+  (102 vs 92 s), ambulances on all four approaches at once (103 vs 86 s), demand beyond
+  capacity (404 vs 395 s) and the camera outage (113 vs 84 s). Seen through a realistic camera
+  (detection errors, intent read from heading) it stays safe, with longer worst waits under
+  overload.
 - No controller can be proven optimal in every case. The learned policy is kept inside a
   rule-based envelope so its failures are bounded: without it, a lone car at an empty
   junction waited 332 s; with it, 14 s.
@@ -76,7 +80,7 @@ pip install -r requirements.txt     # numpy, matplotlib, pytest
 python main.py                      # live console simulation (Fixed Timer, 100 ticks)
 python run_experiments.py           # train RL (3 seeds x 2 agents, parallel) + evaluate all (~3 min)
 python run_experiments.py --use-saved   # re-evaluate saved models only (~10 s)
-python -m pytest                    # 91 tests (~40 s)
+python -m pytest                    # 103 tests (~40 s)
 python visualize.py                 # build and open the simulation viewer
 python -m evaluation.stress_test    # edge cases + safety invariants -> results/stress_test.md
 ```
@@ -102,8 +106,8 @@ traffic_source ──spawn──▶ Intersection (16 lanes) ◀──discharge�
 - **The scheduler is generic.** It runs green → yellow → next phase, and asks a pluggable
   `Strategy` what to run next (Strategy pattern). Ambulance preemption is checked before
   any strategy is consulted.
-- **Fixed Timer** rotates through the 10 phases with 12 s greens.
-- **Density** ranks approaches by queue length, scores all 10 phases by how much
+- **Fixed Timer** rotates through the 6 phases with 12 s greens.
+- **Density** ranks approaches by queue length, scores all 6 phases by how much
   high-density traffic they serve, and sizes green time from the longest queue
   (10–40 s). A phase-recency bonus keeps every phase reachable.
 - **RL** (`perception/`, `env/`, `rl/`): the agent sees the junction through a per-lane

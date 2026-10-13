@@ -42,10 +42,9 @@ class PhaseType(Enum):
     """
     Types of traffic phases.
 
-    The ten normal phases map to the official 10-phase signal plan. Each
-    Phase object wraps exactly the compatible movements listed for that
-    phase (interpreted from the driver's perspective). The scheduler only
-    ever activates these predefined phases.
+    The six normal phases are the conflict-free plan in config/phases.py
+    (vehicles drive on the left). The scheduler only ever activates these
+    predefined phases.
 
     EMERGENCY_OVERRIDE is separate: it is built dynamically for ambulance
     preemption and does not modify the approved normal phase definitions.
@@ -56,8 +55,4 @@ class PhaseType(Enum):
     PHASE_4 = auto()
     PHASE_5 = auto()
     PHASE_6 = auto()
-    PHASE_7 = auto()
-    PHASE_8 = auto()
-    PHASE_9 = auto()
-    PHASE_10 = auto()
     EMERGENCY_OVERRIDE = auto()

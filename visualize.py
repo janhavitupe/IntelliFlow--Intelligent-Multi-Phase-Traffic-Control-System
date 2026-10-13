@@ -122,7 +122,7 @@ def record(job):
         f["amb"].append(sum(1 << i for i, mid in enumerate(LANE_ORDER)
                             if any(v.vehicle_type == VehicleType.AMBULANCE for v in lanes[mid].queue)))
         pt = sch.active_phase_type
-        f["phase"].append(-1 if pt is None else (10 if pt == PhaseType.EMERGENCY_OVERRIDE
+        f["phase"].append(-1 if pt is None else (len(PHASES) if pt == PhaseType.EMERGENCY_OVERRIDE
                                                  else PHASES.index(pt.name)))
         a = sim.analytics
         f["avg"].append(round(a.average_delay, 1))
@@ -153,7 +153,9 @@ def build(scenario_ids=None, open_browser=True):
     plan = build_phase_plan(Intersection())
     phase_lanes = [[LANE_ORDER.index(m.movement_id) for m in plan[PhaseType[p]].movements]
                    for p in PHASES]
+    from config.phases import PHASE_DESCRIPTIONS
     data = {"lanes": list(LANE_ORDER), "phases": PHASES, "phase_lanes": phase_lanes,
+            "phase_desc": [PHASE_DESCRIPTIONS[PhaseType[p]] for p in PHASES],
             "controllers": CONTROLLERS,
             "scenarios": meta, "runs": runs,
             "safety": {"max_red": rl_config.SAFETY_MAX_RED},

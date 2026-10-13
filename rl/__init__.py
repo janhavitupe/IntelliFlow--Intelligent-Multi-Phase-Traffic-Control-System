@@ -3,7 +3,7 @@ rl package
 
 Reinforcement-learning agents and training loops for Phase 4.
 
-    - TabularQAgent : Q-learning over a discretized state (2430 buckets).
+    - TabularQAgent : Q-learning over a discretized state (1458 buckets).
     - DQNAgent      : Deep Q-Network (pure-numpy MLP + Adam, replay buffer,
                       target network, Double-DQN, Huber loss) over the raw
                       observation vector.

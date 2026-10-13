@@ -10,18 +10,18 @@
 
 **Known scenario property**: RUSH_HOUR demand (~3.3 veh/s) exceeds the intersection's service capacity (~2.7 veh/s), so queues grow under every controller, and ~1% of vehicles are ambulances (about one every 30 s), so most of that profile is spent in rule-based emergency preemption. It is kept as an oversaturated stress test; per-profile results below keep it from dominating.
 
-### State features (75-dimensional observation)
+### State features (71-dimensional observation)
 
 The controller sees the intersection only through a **perception** layer: per lane, the vehicles it can see and how long each has waited (what a camera with detection + tracking can provide). Features:
 
 - 16 lanes x 4: vehicle count, mean wait, longest wait, and number of vehicles waiting more than 60 s
 - 10 active-phase one-hot values
 - 1  elapsed green time of the active phase
-- **75 total**, computed by one function in both training and inference
+- **71 total**, computed by one function in both training and inference
 
 ### Action space (10 discrete actions, extend-or-switch)
 
-- PHASE_1 ... PHASE_10, chosen each time the active green runs out.
+- PHASE_1 ... PHASE_6 (the conflict-free plan in config/phases.py), chosen each time the active green runs out.
 - Choosing the active phase extends it by 5 s; choosing another starts it (after yellow) with 10 s green.
 - Green is capped at 40 s. These are the same bounds the Density controller uses.
 
@@ -38,13 +38,13 @@ Every waiting vehicle costs 1 per second, and more the longer *it* has waited (3
 
 ### 1. Tabular Q-Learning
 
-- State: queue LOW/MED/HIGH per approach (3^4 = 81) x active phase (10) x elapsed-green level (3) => **2430 states**; Q-table (2430, 10).
+- State: queue LOW/MED/HIGH per approach (3^4 = 81) x active phase (10) x elapsed-green level (3) => **1458 states**; Q-table (1458, 6).
 - Q-learning with linearly decaying epsilon-greedy exploration.
 
 ### 2. DQN (Deep Q-Network)
 
 ```
-75 inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values
+71 inputs -> 64 (ReLU) -> 64 (ReLU) -> 6 Q-values
 ```
 
 - Pure-numpy MLP and Adam optimizer (no deep-learning framework).
@@ -64,10 +64,10 @@ Mean over all profiles and test seeds. RL: mean ± std across training seeds.
 
 | Controller | Avg delay/veh (s) | P95 delay (s) | Max delay (s) | Ambulance delay (s) | Avg queue (veh) | Throughput (veh/s) | Queued veh-s | Delay cut vs Fixed |
 |---|---|---|---|---|---|---|---|---|
-| Fixed Timer | 31.0 | 112.1 | 178.0 | 15.6 | 71.2 | 1.224 | 5791.7 | +0.0% |
-| Density | 26.6 | 89.6 | 141.5 | 13.1 | 61.8 | 1.250 | 4369.7 | +16.8% |
-| Q-Learning | 24.3 ± 1.4 | 82.3 ± 4.5 | 126.6 ± 4.8 | 12.9 ± 0.8 | 60.7 ± 3.8 | 1.266 ± 0.005 | 4256.5 ± 436.2 | +31.0% |
-| DQN | 18.3 ± 0.6 | 64.2 ± 1.4 | 102.6 ± 3.5 | 9.5 ± 0.8 | 45.0 ± 2.0 | 1.302 ± 0.006 | 2526.9 ± 209.2 | +47.4% |
+| Fixed Timer | 35.1 | 121.5 | 201.3 | 17.0 | 72.4 | 1.236 | 4830.7 | +0.0% |
+| Density | 26.0 | 82.8 | 125.2 | 16.7 | 66.0 | 1.249 | 4897.2 | +39.3% |
+| Q-Learning | 23.6 ± 0.8 | 75.1 ± 1.7 | 118.9 ± 1.7 | 14.3 ± 1.2 | 60.2 ± 2.7 | 1.266 ± 0.005 | 4022.2 ± 375.9 | +45.7% |
+| DQN | 20.8 ± 0.1 | 69.2 ± 0.6 | 112.3 ± 3.5 | 11.9 ± 0.2 | 52.6 ± 0.3 | 1.284 ± 0.003 | 3215.6 ± 47.1 | +51.2% |
 
 _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean, over profiles, of the % reduction in avg delay vs Fixed Timer (positive = better), so every profile counts equally._
 
@@ -75,24 +75,24 @@ _All metrics lower is better except Throughput. "Delay cut vs Fixed" is the mean
 
 | Controller | LIGHT_TRAFFIC | NORMAL_TRAFFIC | RUSH_HOUR | NIGHT | CUSTOM |
 |---|---|---|---|---|---|
-| Fixed Timer | 13.5 | 18.3 | 85.8 | 16.0 | 21.6 |
-| Density | 11.8 | 11.0 | 76.3 | 13.9 | 19.9 |
-| Q-Learning | 6.2 | 13.2 | 74.9 | 8.5 | 18.6 |
-| DQN | 5.7 | 9.1 | 57.4 | 8.7 | 10.8 |
+| Fixed Timer | 16.6 | 21.2 | 70.6 | 20.4 | 46.9 |
+| Density | 8.1 | 12.0 | 85.9 | 9.2 | 14.7 |
+| Q-Learning | 4.9 | 12.8 | 75.4 | 7.8 | 17.0 |
+| DQN | 4.9 | 11.3 | 66.8 | 7.8 | 13.0 |
 
 ### DQN vs Density
 
-Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-8.26 s** (95% bootstrap CI -10.99 to -5.80 s). The interval excludes 0.
+Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed) pairs: **-5.19 s** (95% bootstrap CI -8.21 to -2.56 s). The interval excludes 0.
 
 ### Safety envelope and robustness (same trained DQNs)
 
 | Variant | Avg delay/veh (s) | P95 delay (s) | Max delay (s) | Ambulance delay (s) | Avg queue (veh) | Throughput (veh/s) |
 |---|---|---|---|---|---|---|
-| DQN | 18.3 ± 0.6 | 64.2 ± 1.4 | 102.6 ± 3.5 | 9.5 ± 0.8 | 45.0 ± 2.0 | 1.302 ± 0.006 |
-| DQN (raw policy) | 19.0 ± 1.8 | 70.4 ± 8.9 | 140.1 ± 15.7 | 7.9 ± 1.0 | 38.4 ± 3.2 | 1.329 ± 0.009 |
-| DQN + camera noise | 18.9 ± 0.5 | 68.1 ± 0.2 | 108.5 ± 2.2 | 9.4 ± 0.3 | 45.7 ± 1.4 | 1.298 ± 0.006 |
-| DQN + heading intent | 18.6 ± 0.6 | 67.7 ± 2.7 | 108.3 ± 6.1 | 9.1 ± 0.4 | 45.2 ± 1.3 | 1.304 ± 0.004 |
-| DQN + intent + camera noise | 19.1 ± 0.3 | 71.0 ± 0.3 | 111.4 ± 2.0 | 9.1 ± 0.6 | 45.9 ± 1.4 | 1.298 ± 0.007 |
+| DQN | 20.8 ± 0.1 | 69.2 ± 0.6 | 112.3 ± 3.5 | 11.9 ± 0.2 | 52.6 ± 0.3 | 1.284 ± 0.003 |
+| DQN (raw policy) | 24.3 ± 1.8 | 90.9 ± 10.4 | 194.8 ± 20.5 | 9.8 ± 0.4 | 46.5 ± 0.9 | 1.310 ± 0.004 |
+| DQN + camera noise | 21.7 ± 0.1 | 73.0 ± 1.5 | 117.2 ± 1.0 | 12.5 ± 0.2 | 54.6 ± 0.0 | 1.281 ± 0.002 |
+| DQN + heading intent | 21.1 ± 0.4 | 72.5 ± 3.4 | 120.0 ± 8.2 | 11.3 ± 0.7 | 52.5 ± 1.0 | 1.287 ± 0.003 |
+| DQN + intent + camera noise | 21.7 ± 0.7 | 75.5 ± 5.5 | 119.7 ± 10.3 | 11.5 ± 0.4 | 53.3 ± 1.5 | 1.285 ± 0.005 |
 
 - **Camera noise**: observations from simulated cameras (5% missed vehicles, 2% phantom detections per lane, 15-vehicle view limit, 10% wait-estimate error, 5% lost tracks). Assumed rates, to be calibrated on real footage.
 - **Heading intent**: the camera knows a vehicle's turn only from the way it faces. Only the first 3 vehicles of a turning lane are angled toward their exit (and 5% of those are still read as straight); turning vehicles further back are counted as going straight.
@@ -102,11 +102,11 @@ Paired difference in avg delay (DQN − Density) over the 25 (profile, test seed
 
 Greedy policy scored every 25 episodes on validation seeds [1000, 1001] (1200 ticks per profile), avg delay per vehicle (s); best checkpoint kept:
 
-- Q-Learning (seed 42): 35.3 untrained -> best 25.5 at episode 325.
-- Q-Learning (seed 7): 35.3 untrained -> best 24.8 at episode 275.
-- Q-Learning (seed 123): 35.3 untrained -> best 24.0 at episode 300.
-- DQN (seed 42): 30.9 untrained -> best 18.2 at episode 275.
-- DQN (seed 7): 29.4 untrained -> best 18.3 at episode 250.
-- DQN (seed 123): 26.0 untrained -> best 19.5 at episode 475.
-- Fixed Timer on the same validation set: 35.2.
-- Density on the same validation set: 27.3.
+- Q-Learning (seed 42): 27.9 untrained -> best 25.8 at episode 400.
+- Q-Learning (seed 7): 27.9 untrained -> best 24.4 at episode 100.
+- Q-Learning (seed 123): 27.9 untrained -> best 23.9 at episode 125.
+- DQN (seed 42): 29.0 untrained -> best 21.5 at episode 175.
+- DQN (seed 7): 30.9 untrained -> best 21.8 at episode 450.
+- DQN (seed 123): 26.8 untrained -> best 21.5 at episode 275.
+- Fixed Timer on the same validation set: 41.8.
+- Density on the same validation set: 26.9.

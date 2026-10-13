@@ -19,7 +19,7 @@ Decision pipeline (runs once per scheduling decision):
     4. FAIRNESS    - if an approach has starved for MAX_STARVATION_CYCLES
                      consecutive cycles and still holds queued vehicles, add
                      a fairness boost so it can win (LOW never starves).
-    5. SCORE PHASES - score ALL 10 normal phases every cycle:
+    5. SCORE PHASES - score ALL normal phases every cycle:
 
                         Phase Score = sum over approaches of (
                             Approach Weight x Phase Coverage
@@ -81,6 +81,7 @@ class DensityStrategy(BaseStrategy):
 
     def __init__(self, config=None):
         super().__init__(name="density")
+        self.gap_out = True
         cfg = config or density_config
 
         # Green-time limits + extension.
@@ -160,7 +161,7 @@ class DensityStrategy(BaseStrategy):
         # 4. Enforce fairness (update starvation, apply boosts).
         weights, fairness_active = self._apply_fairness(counts, densities)
 
-        # 5. Score ALL 10 phases and pick the best.
+        # 5. Score ALL phases and pick the best.
         phase = self._select_phase(intersection, counts, densities, weights)
 
         # 6. Compute adaptive green duration (continuous discharge).
@@ -290,12 +291,12 @@ class DensityStrategy(BaseStrategy):
         return weights, fairness_active
 
     # ------------------------------------------------------------------
-    # 5. Score all 10 phases
+    # 5. Score all phases
     # ------------------------------------------------------------------
 
     def _select_phase(self, intersection, counts, densities, weights):
         """
-        Score ALL 10 normal phases and select the best.
+        Score ALL normal phases and select the best.
 
         For each phase:
             Phase Score = sum over approaches of (
@@ -337,7 +338,7 @@ class DensityStrategy(BaseStrategy):
             # longer a phase goes unselected, the larger its bonus grows, so
             # it eventually out-scores every other phase. This keeps every
             # normal phase reachable even when it is coverage-dominated by a
-            # superset phase (e.g. PHASE_1 vs PHASE_8).
+            # superset phase.
             if self.phase_recency_enabled:
                 recency = self._phase_recency.get(phase_type.name, 0)
                 if recency >= self.max_phase_starvation_cycles:

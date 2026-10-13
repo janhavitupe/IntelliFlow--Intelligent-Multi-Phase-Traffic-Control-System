@@ -4,8 +4,8 @@ agents.py
 Reinforcement-learning agents for the traffic RL environment.
 
 Stage 1: TabularQAgent
-    Q-learning over a discretized state (2430 buckets = 3^4 queue levels x
-    10 active phase x 3 elapsed-green levels). epsilon-greedy action
+    Q-learning over a discretized state (1458 buckets = 3^4 queue levels x
+    6 active phase x 3 elapsed-green levels). epsilon-greedy action
     selection. Simple, fast, fully interpretable - the recommended
     sanity-check baseline before DQN.
 
@@ -28,7 +28,7 @@ class TabularQAgent:
 
     Args:
         n_states (int): number of discrete states (Discretizer.N_STATES).
-        n_actions (int): number of actions (10 phases).
+        n_actions (int): number of actions (one per phase).
         gamma (float): discount factor.
         alpha (float): learning rate.
         epsilon (float): initial exploration probability.
@@ -39,7 +39,7 @@ class TabularQAgent:
     def __init__(
         self,
         n_states=Discretizer.N_STATES,
-        n_actions=10,
+        n_actions=rl_config.NUM_PHASES,
         gamma=None,
         alpha=None,
         epsilon=None,

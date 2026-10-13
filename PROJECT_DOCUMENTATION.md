@@ -62,7 +62,7 @@ traffic/
 │   ├── phase.py                 # a set of movements that are green together
 │   └── intersection.py          # 4 approaches; spawning and aggregate state
 ├── config/
-│   ├── phases.py                # the official 10-phase plan + emergency phase builder
+│   ├── phases.py                # the 6-phase conflict-free plan + emergency phase builder
 │   ├── simulation.py            # tick, green/yellow, emergency timing, service times
 │   ├── traffic_profiles.py      # the 5 scenarios
 │   ├── density.py               # Density controller parameters
@@ -98,16 +98,37 @@ traffic/
 | `Phase` | A set of movements that are green together |
 | `Intersection` | The 4 approaches; spawning, waiting-time updates, the clock |
 
-**Traffic convention:** left-hand traffic. Left turns are the "free" movements and
-appear in most phases.
+**Traffic convention:** left-hand traffic. Each approach's four lanes run from the centre
+line outwards: U-turn, right, straight, left.
 
-### The 10-phase plan
+### The phase plan (6 phases, conflict-free by construction)
 
-Defined in `config/phases.py` from the official phase diagrams. Each phase holds 7–8 of
-the 16 movements, and **every phase serves at least one movement on every approach**.
-The scheduler only ever activates these 10 phases, plus `EMERGENCY_OVERRIDE`, which is
-built at runtime and greens all 4 movements of the ambulance's approach. The plan is
-pinned movement for movement by `tests/test_phase_plan.py`.
+The plan was derived from the geometry of the movements (`evaluation/phase_geometry.py`):
+every movement's path through the junction is computed, and two movements conflict if
+their paths cross or end in the same exit lane. That gives three rules:
+
+- **Left turns hug the kerb and cross nobody**, so every phase includes all four ("free left").
+- **A right turn crosses the oncoming straight**, so right turns run only in their own
+  approach's phase.
+- **Opposite straights never cross**; adjacent straights always do. A U-turn crosses only
+  the straight of the approach on its left.
+
+| Phase | Green | Purpose |
+|---|---|---|
+| 1 North-South through | N + S straight and U-turn, all lefts | Main-road flow |
+| 2 North approach | all North movements, S + W U-turn, all lefts | North clears, incl. right turns |
+| 3 South approach | all South movements, N + E U-turn, all lefts | South clears |
+| 4 East-West through | E + W straight and U-turn, all lefts | Cross-road flow |
+| 5 East approach | all East movements, N + W U-turn, all lefts | East clears |
+| 6 West approach | all West movements, E + S U-turn, all lefts | West clears |
+
+Each phase is a maximal conflict-free group: nothing more can be added without a crossing.
+`tests/test_phase_plan.py` re-checks every phase geometrically, so a phase with crossing
+paths fails the test suite. `EMERGENCY_OVERRIDE` is built at runtime and greens the four
+movements of the ambulance's approach.
+
+The original 10-phase plan this replaced let West straight and East right turn go together
+in its Phase 5, and those paths cross.
 
 ---
 
@@ -142,17 +163,27 @@ results are reported per profile so it can't dominate the averages.
 1. **An emergency in progress** advances the emergency state machine (below) and stops there.
 2. **A new ambulance** queued on any approach (scanned North, South, East, West) starts preemption.
 3. **Otherwise, normal scheduling**: count down green; when it runs out, call
-   `strategy.on_green_end()` (extend, end, or hold). On ending: 2 s yellow, then
-   `strategy.decide_next_phase()` picks the next phase and its green time.
+   `strategy.on_green_end()` (extend, end, or hold). On ending: **2 s yellow, then 2 s
+   all-red**, then `strategy.decide_next_phase()` picks the next phase and its green time.
 
 `on_green_end()` returns `None` by default (no extension), so Fixed Timer and Density
 size their green up front. The RL strategy uses it to extend green in 5 s steps.
 
+**All-red clearance.** After every yellow (normal or emergency) every signal is red for
+2 s, so vehicles that entered on the last green leave the junction before any crossing
+movement starts.
+
+**Gap-out (adaptive controllers only).** Once a green has lasted 5 s, if every lane it
+serves has been empty for 2 s and vehicles wait elsewhere, the green ends early. Without
+it, about half of all green time went to lanes that were already empty while queues built
+up on red. The Fixed Timer never gaps out. Values (`config/simulation.py`) are standard
+engineering values, not tuned to results.
+
 ### Emergency preemption
 
 ```
-NORMAL GREEN → 2 s YELLOW CLEARANCE → EMERGENCY GREEN (ambulance's approach only)
-            → held until the ambulance has cleared → RESUME NORMAL SCHEDULING
+NORMAL GREEN → 2 s YELLOW → 2 s ALL-RED → EMERGENCY GREEN (ambulance's approach only)
+            → held until the ambulance has cleared → 2 s YELLOW → 2 s ALL-RED → NORMAL
 ```
 
 - **Fail-safe:** the emergency green is released after 30 s even if the ambulance
@@ -162,7 +193,7 @@ NORMAL GREEN → 2 s YELLOW CLEARANCE → EMERGENCY GREEN (ambulance's approach 
   re-detected on the next tick and the intersection never left emergency mode. Other
   approaches can still preempt during the cooldown.
 
-Timings live in `config/simulation.py` (`EMERGENCY_YELLOW_TIME`, `EMERGENCY_MAX_TIMEOUT`,
+Timings live in `config/simulation.py` (`ALL_RED_TIME`, `GAP_OUT_MIN_GREEN`, `GAP_OUT_TIME`, `EMERGENCY_YELLOW_TIME`, `EMERGENCY_MAX_TIMEOUT`,
 `EMERGENCY_COOLDOWN`).
 
 ---
@@ -172,25 +203,24 @@ Timings live in `config/simulation.py` (`EMERGENCY_YELLOW_TIME`, `EMERGENCY_MAX_
 All implement `BaseStrategy` and plug into `Simulation(strategy_key=...)` or `Simulation(strategy=...)`.
 
 ### 6.1 Fixed Timer (baseline)
-Round-robin through PHASE_1 → PHASE_10 with a fixed 12 s green.
+Round-robin through PHASE_1 → PHASE_6 with a fixed 12 s green (no gap-out).
 
 ### 6.2 Density (rule-based adaptive)
 Observes only the number of queued vehicles per approach. At each decision:
 
 1. **Rank** the 4 approaches by queue length (ties: North, South, East, West).
 2. **Classify** by rank ("quartile" mode: HIGH, MEDIUM, MEDIUM, LOW), with weights 3 / 2 / 1.
-3. **Score all 10 phases**: Σ over approaches of (weight × fraction of that approach's 4
+3. **Score all 6 phases**: Σ over approaches of (weight × fraction of that approach's 4
    movements the phase serves). The highest score wins; ties go to the lower phase number.
 4. **Phase-recency bonus**: a phase not chosen for 6+ decisions gets +3 per decision
-   waited. This keeps phases that are subsets of others (e.g. PHASE_1 ⊂ PHASE_8)
-   reachable.
+   waited. This keeps every phase reachable.
 5. **Green time**: if the longest approach queue is ≥ 15 vehicles, green is extended
    from 10 s in 5 s steps toward (longest queue ÷ 2 veh/s), capped at 40 s; otherwise 10 s.
 
-How it behaves in practice (5 profiles × 10 min, 214 decisions):
+How it behaves in practice (5 profiles × 10 min, 236 decisions, 6-phase plan):
 
-- The **phase-recency bonus is active in 86% of decisions**, so it shapes most choices.
-- **Green is the 10 s minimum in 89% of decisions**.
+- The **phase-recency bonus is active in 54% of decisions**, so it shapes many choices.
+- **Green is the 10 s minimum in 96% of decisions** (gap-out may then end it sooner).
 - The **approach-level starvation boost never fires.** It triggers when an approach
   goes unserved for 4 decisions, but every phase serves every approach (§3), so that
   can't happen. The phase-recency bonus is what actually provides fairness.
@@ -243,7 +273,7 @@ Implemented in `analytics/statistics.py`.
 ### 9.1 Environment (`env/traffic_env.py`)
 
 ```
-reset()        -> 75-dim observation at the first decision point
+reset()        -> 71-value observation at the first decision point
 step(action)   -> (next_obs, reward, done, info)      action in 0..9
 info           -> {"duration": seconds the step lasted, "truncated": bool}
 ```
@@ -261,8 +291,8 @@ summary (§9.6) and turns it into 75 numbers:
 | Index | Feature |
 |---|---|
 | 0–63 | For each of the 16 lanes: count ÷ 10, mean wait ÷ 60 s, longest wait ÷ 60 s (waits capped at 3), number of vehicles waiting > 60 s ÷ 10 |
-| 64–73 | Active phase, one-hot |
-| 74 | Elapsed green of the active phase ÷ 40 s |
+| 64–69 | Active phase, one-hot |
+| 70 | Elapsed green of the active phase ÷ 40 s |
 
 The long-waiter count makes "1 vehicle waiting 150 s" and "10 vehicles waiting 150 s"
 different states, and lane resolution matches what a phase actually serves.
@@ -276,7 +306,7 @@ and a long-waiting group gradually outweighs a larger group of fresh arrivals (�
 terminal state, so learners still bootstrap from the final state.
 
 ### 9.2 Actions: extend-or-switch
-Each time the active green runs out, the agent picks one of the 10 phases:
+Each time the active green runs out (or gaps out), the agent picks one of the 6 phases:
 
 - **Same phase** → extend green by 5 s.
 - **Another phase** → 2 s yellow, then that phase with a 10 s minimum green.
@@ -289,8 +319,8 @@ These are the same 10 / +5 / 40 s bounds Density uses. Steps therefore last 5 s 
 ### 9.3 Agents
 - **Tabular Q-learning** (`rl/agents.py`): state = queue LOW/MED/HIGH per approach
   (< 5, 5–19, ≥ 20) × active phase × elapsed-green level (< 15 s, 15–35 s, cap) =
-  **2,430 states**; Q-table (2430, 10).
-- **DQN** (`rl/dqn.py`), all numpy: MLP 75 → 64 → 64 → 10 (ReLU), Adam optimiser,
+  **1,458 states**; Q-table (1458, 6).
+- **DQN** (`rl/dqn.py`), all numpy: MLP 71 → 64 → 64 → 6 (ReLU), Adam optimiser,
   experience replay (20k), target network (synced every 200 updates), **Double-DQN**
   targets, **Huber loss**, gradient-norm clipping (10). The backprop is checked
   against finite differences in the tests.
@@ -342,9 +372,9 @@ tracking gives how long each has been stopped. Two sources exist today:
   straight and are counted as straight demand. It wraps any other source, so it combines with
   `NoisyPerception`.
 
-Robustness of the deployed DQN on the test seeds (no retraining): perfect information 18.3 s;
-heading intent 18.6 s; camera noise 18.9 s; heading intent + camera noise 19.1 s (Density,
-with perfect information: 26.6 s). The simulation viewer runs the DQN with heading intent.
+Robustness of the deployed DQN on the test seeds (no retraining): perfect information 20.8 s;
+heading intent 21.1 s; camera noise 21.7 s; heading intent + camera noise 21.7 s (Density,
+with perfect information: 26.0 s). The simulation viewer runs the DQN with heading intent.
 
 A future camera pipeline implements the same `observe()` contract; the controller doesn't change.
 The reward still uses true waits, because it's only needed in training, in simulation.
@@ -371,8 +401,8 @@ them off, so the agent is only ever credited for its own actions.
 They were chosen on the edge-case stress test (§10.1) with a rule written down in advance. The
 raw policy, for comparison: a lone car at an empty junction waited 332 s; with the envelope,
 14 s. The envelope also improves the standard benchmark (same trained models, raw policy →
-with envelope: average delay 19.0 → 18.3 s, longest wait 140 → 103 s; light traffic 5.7 s vs
-Density's 11.8 s), at a small cost in throughput (1.329 → 1.302 veh/s).
+with envelope: average delay 24.3 → 20.8 s, longest wait 195 → 112 s; light traffic 4.9 s vs
+Density's 8.1 s), at a small cost in throughput (1.310 → 1.284 veh/s).
 
 ---
 
@@ -424,20 +454,23 @@ synchronised junction views, live stats, a queue chart and an end-of-run table.
 
 Current numbers: [results/model_cards.md](results/model_cards.md). What they show:
 
-- **The deployed DQN is the best controller overall**: about 31% less average delay than
-  Density (−8.3 s, 95% CI [−11.0, −5.8]), a shorter worst-case wait (103 vs 142 s), a better
-  95th-percentile wait, shorter queues and lower ambulance delay. It wins in all five
-  standard profiles.
-- **Edge cases**: lowest average delay in 9 of the 11 non-empty scenarios (second in the
-  other two); worst-case wait above both baselines in two (simultaneous ambulances 84 vs 81 s,
-  camera outage 95 vs 82 s). Safety invariants: 0 violations, including through a realistic
-  camera (detection errors + heading-based intent).
+- **The deployed DQN is the best controller overall**: about 20% less average delay than
+  Density (−5.2 s, 95% CI [−8.2, −2.6]), a shorter worst-case wait (112 vs 125 s), a better
+  95th-percentile wait, shorter queues, higher throughput and lower ambulance delay. It is
+  best in all five standard profiles. (Numbers fell versus earlier versions of this document
+  because the old plan let crossing paths go together in one phase and had no all-red
+  clearance: those were unsafe gains.)
+- **Edge cases**: lowest average delay in 7 of the 11 non-empty scenarios; worst-case wait
+  above both baselines in four (surge, simultaneous ambulances, demand beyond capacity,
+  camera outage). Safety invariants: 0 violations, including through a realistic camera
+  (detection errors + heading-based intent).
 - **Robust to camera errors**: with simulated detection and tracking errors, average delay
-  rises about 3% (18.3 → 18.9 s); with turn intent read from heading as well, 19.1 s.
+  rises about 4% (20.8 → 21.7 s); with turn intent read from heading as well, 21.7 s.
 - **The fairness trade-off is explicit**: the wait-aware reward and the safety envelope
   shorten the longest waits at a small cost in throughput.
-- **Tabular Q-learning is behind Fixed Timer.** Its coarse LOW/MED/HIGH state can't tell
-  "busy" from "gridlocked", which is the motivation for the DQN. It is also sensitive to
+- **Tabular Q-learning** (inside the same safety envelope) now beats both rule-based
+  controllers (23.6 s) but trails the DQN. Its coarse LOW/MED/HIGH state can't tell "busy"
+  from "gridlocked", which is the motivation for the DQN. It is also sensitive to
   tiny perturbations: a 1e-16 rounding difference flipping one tied `argmax` late in
   training is enough to send a run down a different path.
 
@@ -448,7 +481,7 @@ Current numbers: [results/model_cards.md](results/model_cards.md). What they sho
 
 ## 12. Testing
 
-`python -m pytest` runs 91 tests (~40 s), also in CI on every push and pull request.
+`python -m pytest` runs 103 tests (~40 s), also in CI on every push and pull request.
 
 | Area | Examples |
 |---|---|

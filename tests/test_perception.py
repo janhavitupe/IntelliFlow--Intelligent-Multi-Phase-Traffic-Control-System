@@ -93,7 +93,7 @@ def test_no_empty_green_serves_the_most_accumulated_waiting(intersection):
     choice = strategy._get_action(intersection, phase1, time=30.0)
     served = {m.movement_id for m in build_phase_plan(intersection)[strategy._phases[choice]].movements}
     assert "East_STRAIGHT" in served and strategy.empty_green_overrides == 1
-    add(intersection, "West", car(waiting=5.0))                # now PHASE_1 serves someone
+    add(intersection, "South", car(waiting=5.0))               # now PHASE_1 serves someone
     assert strategy._get_action(intersection, phase1, time=31.0) == 0
 
 

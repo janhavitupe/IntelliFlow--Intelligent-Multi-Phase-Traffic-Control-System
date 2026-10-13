@@ -48,6 +48,25 @@ STRATEGY = "fixed_timer"
 # ---------------------------------------------------------------------------
 EMERGENCY_YELLOW_TIME = 2.0
 EMERGENCY_MAX_TIMEOUT = 30.0
+
+# ---------------------------------------------------------------------------
+# Clearance and gap-out (seconds)
+#
+# ALL_RED_TIME     : after every yellow (normal or emergency) all signals stay
+#                    red this long, so vehicles that entered on the last green
+#                    clear the junction before any crossing movement starts.
+# GAP_OUT_MIN_GREEN: an adaptive controller may end a green early ("gap-out")
+#                    once it has lasted at least this long ...
+# GAP_OUT_TIME     : ... and every lane it serves has been empty this long,
+#                    while vehicles wait elsewhere. Without it a phase whose
+#                    one or two cars left in a second keeps its full minimum
+#                    green while queues build up on red. The fixed timer
+#                    never gaps out.
+# Standard engineering values, not tuned to results.
+# ---------------------------------------------------------------------------
+ALL_RED_TIME = 2.0
+GAP_OUT_MIN_GREEN = 5.0
+GAP_OUT_TIME = 2.0
 EMERGENCY_COOLDOWN = 30.0
 
 # ---------------------------------------------------------------------------

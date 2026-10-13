@@ -7,7 +7,7 @@ untouched. At demo/inference time select_phase(state) = argmax_a Q(state, a)
 is just a table lookup / forward pass - no training happens live.
 
 Green-time control (extend-or-switch):
-    The agent picks one of the 10 phases at every decision point:
+    The agent picks one of the 6 phases at every decision point:
       - at the start (and after an emergency): the phase to run,
       - each time the active green runs out: picking the CURRENT phase
         extends it by GREEN_EXTENSION seconds; picking another phase ends
@@ -98,6 +98,7 @@ class RLStrategy(BaseStrategy):
     def __init__(self, agent=None, min_green=None, extension=None, max_green=None,
                  perception=None, max_red=_CONFIG, serve_waiting=_CONFIG):
         super().__init__(name="rl")
+        self.gap_out = True
         self.agent = agent
         self.min_green = min_green if min_green is not None else rl_config.MIN_GREEN
         self.extension = extension if extension is not None else rl_config.GREEN_EXTENSION
@@ -162,8 +163,10 @@ class RLStrategy(BaseStrategy):
         return self.last_obs, self.last_state
 
     def _elapsed(self, current_phase, time):
-        """Seconds since the current phase's green started (0 if none)."""
-        return time - self._phase_started_at if current_phase is not None else 0.0
+        """Seconds since the current normal phase's green started (0 if none or emergency)."""
+        if current_phase is None or current_phase.phase_type not in self._phases:
+            return 0.0
+        return time - self._phase_started_at
 
     def _get_action(self, intersection, current_phase, time):
         """

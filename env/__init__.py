@@ -9,7 +9,7 @@ The environment:
     - observation : per-lane vector (count, mean/longest wait, long waiters
                     per lane; active-phase one-hot; elapsed green), built by
                     RLStrategy.observe() for training and inference alike.
-    - action      : one of the 10 phases each time the active green runs
+    - action      : one of the 6 phases each time the active green runs
                     out (same phase = extend 5 s, other phase = switch).
     - reward      : -(wait-weighted queueing delay over the step) / REWARD_SCALE.
     - done        : episode time budget used up (a truncation:

@@ -11,7 +11,7 @@ while an InvariantMonitor checks the safety rules on EVERY tick:
     I1 signals    : only the active phase's movements are green; nothing is
                     green during yellow; everything else is red
     I2 yellow     : a green phase never switches to another without yellow
-    I3 green time : every normal green lasts 10-40 s (unless an ambulance
+    I3 green time : every normal green lasts 5-40 s (5 s = gap-out minimum; unless an ambulance
                     preempts it)
     I4 vehicles   : spawned = served + still queued (no vehicle lost)
     I5 ambulances : every ambulance that arrived early enough has been served
@@ -46,7 +46,7 @@ from simulation import Simulation
 from traffic_source.scenario_traffic_source import ScenarioTrafficSource
 
 TICK = 0.5
-MIN_GREEN, MAX_GREEN = 10.0, 40.0
+MIN_GREEN, MAX_GREEN = 5.0, 40.0          # gap-out minimum, maximum green
 APPROACHES = ("North", "South", "East", "West")
 NO_AMBULANCE_MIX = {"CAR": 71, "BIKE": 18, "BUS": 6, "TRUCK": 5}
 LIGHT = tp.LIGHT_TRAFFIC["schedule"][0][2]["rates"]

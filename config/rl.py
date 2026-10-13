@@ -57,16 +57,16 @@ REWARD_SCALE = 100.0
 WAIT_PENALTY_THRESHOLD = 60.0
 WAIT_PENALTY_SLOPE = 30.0           # chosen on validation (Step 8), see dev_notes
 
-# Observation vector (75-dim): 16 lanes x 4 features + 10 phase one-hot + 1.
+# Observation vector: 16 lanes x 4 features + one-hot of the 6 phases + elapsed green.
 LANE_QUEUE_NORM = 10.0     # vehicles; per-lane count and long-waiter scale
 WAIT_NORM = 60.0           # seconds; mean / longest wait feature scale
 MAX_GREEN_NORM = 40.0      # elapsed-green feature scale (= MAX_GREEN)
-OBS_DIM = 75
+OBS_DIM = 16 * 4 + 6 + 1      # = 71
 
 # Tabular Q discretization.
 LOW_THRESHOLD = 5
 HIGH_THRESHOLD = 20
-NUM_PHASES = 10
+NUM_PHASES = 6
 # Elapsed-green buckets: [0, 15) just started, [15, 35] mid, > 35 at the
 # cap (no further extension possible).
 ELAPSED_BUCKET_EDGES = (15.0, 35.0)

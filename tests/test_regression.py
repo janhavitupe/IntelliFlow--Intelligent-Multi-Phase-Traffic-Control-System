@@ -6,6 +6,8 @@ controllers' KPIs are pinned exactly. If one of these fails, a change has
 altered simulation behaviour: confirm that was intended, then update the
 numbers (and expect every reported result to move).
 """
+import math
+
 import pytest
 
 from config import rl as rl_config
@@ -14,10 +16,10 @@ from simulation import Simulation
 
 GOLDEN = {
     # (strategy, profile): (avg_wait, avg_queue, served, spawned) after 200 ticks, seed 1
-    ("fixed_timer", "NORMAL_TRAFFIC"): (232.0525, 16.21, 152, 163),
-    ("fixed_timer", "RUSH_HOUR"): (920.1125, 51.16, 247, 323),
-    ("density", "NORMAL_TRAFFIC"): (186.6475, 14.985, 145, 163),
-    ("density", "RUSH_HOUR"): (615.2475, 38.085, 251, 323),
+    ("fixed_timer", "NORMAL_TRAFFIC"): (484.0525, 25.965, 146, 163),
+    ("fixed_timer", "RUSH_HOUR"): (999.1325, 49.72, 230, 323),
+    ("density", "NORMAL_TRAFFIC"): (254.2125, 18.745, 147, 163),
+    ("density", "RUSH_HOUR"): (905.765, 50.17, 236, 323),
 }
 
 
@@ -44,7 +46,7 @@ class _SpyAgent:
         self.updates = []
 
     def epsilon_greedy(self, state):
-        return len(self.updates) % 10
+        return len(self.updates) % rl_config.NUM_PHASES
 
     def select_action(self, state):
         return 0
@@ -69,8 +71,11 @@ def test_training_loop_uses_truncation_and_per_second_discount():
     discounts = {round(d, 12) for _, d in agent.updates}
     assert terminals and not any(terminals)
     g = rl_config.GAMMA_PER_SECOND
-    assert round(g ** rl_config.MIN_GREEN, 12) in discounts          # first step
-    assert round(g ** (2.0 + rl_config.MIN_GREEN), 12) in discounts  # switches
+    # Every discount is gamma ** (the step's real duration in half-second ticks), and the
+    # durations differ between steps (extensions, switches, gap-outs).
+    ticks = [math.log(d) / math.log(g) / 0.5 for d in discounts]
+    assert all(abs(t - round(t)) < 1e-6 and round(t) >= 1 for t in ticks)
+    assert len(discounts) > 1
 
 
 @pytest.mark.parametrize("train", [train_tabular, train_dqn])

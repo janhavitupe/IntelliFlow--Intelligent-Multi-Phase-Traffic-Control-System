@@ -5,14 +5,14 @@ Builds the RL observation vector (and the tabular discretization) from a
 perception IntersectionObservation: the per-lane summary a camera pipeline
 can provide (vehicle counts and how long each vehicle has waited).
 
-Observation vector (75-dim):
+Observation vector (OBS_DIM = 71):
     For each of the 16 lanes, in perception.LANE_ORDER (4 values each):
         count / LANE_QUEUE_NORM
         mean wait / WAIT_NORM            (clipped at 3)
         longest wait / WAIT_NORM         (clipped at 3)
         long waiters (> LONG_WAIT_THRESHOLD s) / LANE_QUEUE_NORM
-    [64:74]  active phase one-hot (10 normal phases)
-    [74]     elapsed green of the active phase / MAX_GREEN_NORM
+    [64:70]  active phase one-hot (6 normal phases)
+    [70]     elapsed green of the active phase / MAX_GREEN_NORM
 
 The long-waiter count makes "1 vehicle waiting 150 s" and "10 vehicles
 waiting 150 s" different states, and lane resolution matches what a phase
@@ -25,7 +25,7 @@ exactly the same feature definitions in both modes.
 Tabular discretization (for Q-learning):
     queue bucket per approach: LOW / MED / HIGH (3 levels, 4 approaches)
     x active phase (10) x elapsed-green bucket (3: just started / mid /
-    at the MAX_GREEN cap) -> 2430 states.
+    at the MAX_GREEN cap) -> 3^4 x 6 x 3 = 1458 states.
 """
 import numpy as np
 
@@ -81,11 +81,12 @@ class Discretizer:
 
     State = ((queue_bucket(4 approaches) base-3) * 10 + phase_index) * 3
             + elapsed_bucket
-    -> 3^4 * 10 * 3 = 2430 states. The elapsed bucket lets the table tell
+    -> 3^4 * 6 * 3 = 1458 states. The elapsed bucket lets the table tell
     whether the active green can still be extended.
     """
 
-    N_STATES = 3 ** len(APPROACH_ORDER) * 10 * (len(rl_config.ELAPSED_BUCKET_EDGES) + 1)
+    N_STATES = (3 ** len(APPROACH_ORDER) * rl_config.NUM_PHASES
+                * (len(rl_config.ELAPSED_BUCKET_EDGES) + 1))
 
     def __init__(self):
         self.approach_order = APPROACH_ORDER

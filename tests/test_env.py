@@ -46,7 +46,7 @@ def test_reward_is_credited_to_the_action_that_caused_it():
     env = _env()
     env.reset()
     log = _record_ticks(env)
-    for action in [0, 0, 5, 9, 9, 2]:
+    for action in [0, 0, 5, 3, 3, 2]:
         log.clear()
         env.step(action)
         chosen = f"PHASE_{action + 1}"
@@ -57,19 +57,21 @@ def test_reward_is_credited_to_the_action_that_caused_it():
 def test_switch_costs_yellow_plus_min_green_and_extend_costs_extension():
     env = _env()
     env.reset()
+    env.strategy.gap_out = False                       # fixed timings for this test
     _, _, _, info = env.step(0)
     assert info["duration"] == rl_config.MIN_GREEN
     _, _, _, info = env.step(0)                       # extend
     assert info["duration"] == rl_config.GREEN_EXTENSION
     log = _record_ticks(env)
     _, _, _, info = env.step(4)                       # switch
-    assert info["duration"] == 2.0 + rl_config.MIN_GREEN
-    assert sum(1 for _, yellow, _ in log if yellow) == 4
+    assert info["duration"] == 2.0 + 2.0 + rl_config.MIN_GREEN   # yellow + all-red + min green
+    assert sum(1 for _, yellow, _ in log if yellow) == 8
 
 
 def test_extend_at_max_green_advances_to_next_phase():
     env = _env()
     env.reset()
+    env.strategy.gap_out = False
     env.step(0)                                       # 10 s
     for _ in range(6):                                # +30 s -> 40 s (the cap)
         env.step(0)
@@ -94,7 +96,7 @@ def test_episode_ends_at_time_limit_as_truncation():
     env.reset()
     done, steps = False, 0
     while not done:
-        _, _, done, info = env.step(steps % 10)
+        _, _, done, info = env.step(steps % rl_config.NUM_PHASES)
         steps += 1
     assert env.tick == 120
     assert info["truncated"] is True
@@ -117,7 +119,7 @@ def test_same_seed_is_reproducible():
         env.reset()
         done, run = False, []
         while not done:
-            _, r, done, _ = env.step(len(run) % 10)
+            _, r, done, _ = env.step(len(run) % rl_config.NUM_PHASES)
             run.append(r)
         rewards.append(run)
     assert rewards[0] == rewards[1]
@@ -139,7 +141,7 @@ class _ReplayAgent:
 
 def test_training_and_inference_compute_identical_observations():
     """Regression (Step 1): elapsed-time feature differed between the two paths."""
-    actions = [3, 3, 7, 1, 0, 0, 0, 9, 4, 2, 8, 6, 5] * 3
+    actions = [3, 3, 5, 1, 0, 0, 0, 4, 4, 2, 1, 5, 2] * 3
     ticks = 600
 
     env = _env(profile_key="RUSH_HOUR", seed=7, episode_length=ticks)

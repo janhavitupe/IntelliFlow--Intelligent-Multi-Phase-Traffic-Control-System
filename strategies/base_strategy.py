@@ -23,6 +23,11 @@ class BaseStrategy(ABC):
         - decide_next_phase(...): choose the next PhaseType/duration.
     """
 
+    # Actuated gap-out: end a green early once its lanes are empty and other
+    # vehicles wait (scheduler-side, see TrafficScheduler._gaps_out). Adaptive
+    # strategies opt in; the fixed timer does not.
+    gap_out = False
+
     def __init__(self, name: str = "base"):
         self.name = name
 

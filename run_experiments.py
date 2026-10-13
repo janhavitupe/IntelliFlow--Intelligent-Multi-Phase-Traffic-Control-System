@@ -72,6 +72,7 @@ from perception import HeadingIntentPerception, NoisyPerception
 from rl.train import train_tabular, train_dqn, score_policy
 from rl.agents import TabularQAgent
 from rl.dqn import DQNAgent
+from env.state_builder import Discretizer
 
 # ---------------------------------------------------------------------------
 # Experiment configuration
@@ -468,7 +469,8 @@ def write_model_card(rows, training, path):
     add("")
     add("### Action space (10 discrete actions, extend-or-switch)")
     add("")
-    add("- PHASE_1 ... PHASE_10, chosen each time the active green runs out.")
+    add("- PHASE_1 ... PHASE_6 (the conflict-free plan in config/phases.py), chosen each time "
+        "the active green runs out.")
     add(f"- Choosing the active phase extends it by {rl_config.GREEN_EXTENSION:.0f} s; "
         f"choosing another starts it (after yellow) with {rl_config.MIN_GREEN:.0f} s green.")
     add(f"- Green is capped at {rl_config.MAX_GREEN:.0f} s. These are the same bounds "
@@ -494,13 +496,14 @@ def write_model_card(rows, training, path):
     add("### 1. Tabular Q-Learning")
     add("")
     add("- State: queue LOW/MED/HIGH per approach (3^4 = 81) x active phase (10) x "
-        "elapsed-green level (3) => **2430 states**; Q-table (2430, 10).")
+        f"elapsed-green level (3) => **{Discretizer.N_STATES} states**; Q-table "
+        f"({Discretizer.N_STATES}, {rl_config.NUM_PHASES}).")
     add("- Q-learning with linearly decaying epsilon-greedy exploration.")
     add("")
     add("### 2. DQN (Deep Q-Network)")
     add("")
     add("```")
-    add(f"{rl_config.OBS_DIM} inputs -> 64 (ReLU) -> 64 (ReLU) -> 10 Q-values")
+    add(f"{rl_config.OBS_DIM} inputs -> 64 (ReLU) -> 64 (ReLU) -> {rl_config.NUM_PHASES} Q-values")
     add("```")
     add("")
     add("- Pure-numpy MLP and Adam optimizer (no deep-learning framework).")

@@ -10,8 +10,8 @@ from helpers import TICK, add, car
 
 @pytest.fixture
 def green_west_straight(intersection):
-    """PHASE_1 active (includes West_STRAIGHT); returns that movement."""
-    phase = build_phase_plan(intersection)[PhaseType.PHASE_1]
+    """PHASE_4 active (East-West through, includes West_STRAIGHT); returns that movement."""
+    phase = build_phase_plan(intersection)[PhaseType.PHASE_4]
     phase.activate()
     return intersection.get_approach("West").straight
 
